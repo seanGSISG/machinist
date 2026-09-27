@@ -293,6 +293,22 @@ ssh -N -L 7331:127.0.0.1:7331 machinist
 Open <http://127.0.0.1:7331>. Do not expose port 7331 directly or place the
 current unauthenticated UI behind a public reverse proxy.
 
+### Private reverse proxy (optional)
+
+To reach the UI by name on a private network (for example a LAN or tailnet reverse proxy), keep the
+control plane on loopback and put a proxy **that authenticates users** in front of it (for example
+basic auth or forward auth). Then list the proxy's origin so browser actions (approve, settings,
+connections) are accepted:
+
+```toml
+[server]
+trusted_origins = ["https://machinist.example.lan"]
+```
+
+Without this, pages load through the proxy but mutations are refused, because only loopback `http`
+origins are trusted by default. Never add an origin that is reachable without authentication: anyone
+who can use the UI can run agents on this machine.
+
 ## 9. Run a smoke test
 
 Verify the configuration and credentials before assigning a real issue:

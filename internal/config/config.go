@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -65,7 +66,11 @@ type Server struct {
 	Database          string `toml:"database"`
 	WorkerTokenFile   string `toml:"worker_token_file"`
 	MaxConcurrentJobs *int   `toml:"max_concurrent_jobs"`
-	configDir         string
+	// TrustedOrigins are extra browser origins (scheme://host[:port]) allowed to use the UI's
+	// mutating endpoints, for a reverse proxy that adds its own authentication. Loopback http
+	// origins are always accepted.
+	TrustedOrigins []string `toml:"trusted_origins"`
+	configDir      string
 }
 
 type Config struct {
@@ -568,6 +573,13 @@ func applyServerDefaults(server Server) (Server, error) {
 	if server.MaxConcurrentJobs != nil && *server.MaxConcurrentJobs <= 0 {
 		return Server{}, errors.New("max_concurrent_jobs must be positive")
 	}
+	for i, origin := range server.TrustedOrigins {
+		normalized, err := NormalizeOrigin(origin)
+		if err != nil {
+			return Server{}, fmt.Errorf("trusted_origins: %w", err)
+		}
+		server.TrustedOrigins[i] = normalized
+	}
 	tokenPath, err := resolveConfigPath(server.WorkerTokenFile, server.configDir)
 	if err != nil {
 		return Server{}, fmt.Errorf("resolve worker token file: %w", err)
@@ -683,4 +695,14 @@ func commandHash(command ResolvedCommand) (string, error) {
 	}
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// NormalizeOrigin validates a browser origin and returns it as lower-case scheme://host[:port].
+func NormalizeOrigin(origin string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+		parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("%q is not an origin like https://machinist.example.com", origin)
+	}
+	return strings.ToLower(parsed.Scheme + "://" + parsed.Host), nil
 }
