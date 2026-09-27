@@ -22,6 +22,9 @@ The VM needs separate credentials for separate jobs:
 Do not copy private keys or Codex, Claude, or GitHub credential files from your
 computer. Create and authenticate each VM credential on the VM itself.
 
+With login recipes in `worker.toml`, the agent CLI logins can be done from the
+web UI instead of an SSH session; see [Connections](connections.md).
+
 ## 1. Add the local SSH alias
 
 On your computer, add this entry to `~/.ssh/config`:

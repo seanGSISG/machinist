@@ -1,0 +1,47 @@
+# Login and status recipes for the Connections page (docs/connections.md).
+# Append the auth tables you need to worker.toml, under executors you already
+# define. The executor commands below are placeholders for this example.
+# Status commands were checked on 2026-09-27; confirm the login patterns with
+# a first Connect before relying on them.
+
+[executors.claude.auth]
+login = ["claude", "auth", "login", "--claudeai"]
+status = ["claude", "auth", "status"]
+connected_pattern = '"loggedIn":\s*true'
+prompt_pattern = '(?i)paste\s+(the\s+)?code'
+
+[executors.codex.auth]
+login = ["codex", "login", "--device-auth"]
+status = ["codex", "login", "status"]
+connected_pattern = 'Logged in using'
+code_pattern = '\b([A-Z0-9]{4,}-[A-Z0-9]{4,})\b'
+
+[executors.kimi]
+command = ["kimi", "--print"]
+
+[executors.kimi.auth]
+login = ["kimi", "login", "--region", "global"]
+code_pattern = '\b([A-Z0-9]{4,}-[A-Z0-9]{4,})\b'
+
+[executors.omp]
+command = ["omp", "-p"]
+
+[executors.omp.auth]
+login = ["omp", "login", "anthropic"]
+prompt_pattern = '(?i)(paste|enter).{0,40}(code|url)'
+
+[executors.opencode]
+command = ["opencode", "run"]
+
+[executors.opencode.auth]
+login = ["opencode", "auth", "login"]
+status = ["opencode", "auth", "list"]
+
+[executors.pi]
+command = ["pi", "-p"]
+
+[executors.pi.auth]
+login = ["pi"]
+start_input = ["/login\r"]
+status = ["pi", "auth", "check", "--provider", "anthropic", "--json", "--no-refresh"]
+prompt_pattern = '(?i)(paste|enter).{0,40}(code|url)'
