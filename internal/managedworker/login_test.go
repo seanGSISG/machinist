@@ -113,7 +113,12 @@ func TestLoginSessionExtractsLinkAndCodeAndRedactsPastedInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "cwd=" + environment.home + " home=" + environment.home + " path=" + bin + ":/usr/bin:/bin leaked=none\n"
+	// pwd reports the resolved directory: on macOS the temp dir lives under /var -> /private/var.
+	cwd, err := filepath.EvalSymlinks(environment.home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "cwd=" + cwd + " home=" + environment.home + " path=" + bin + ":/usr/bin:/bin leaked=none\n"
 	if string(recorded) != want {
 		t.Fatalf("login environment = %q, want %q", recorded, want)
 	}
