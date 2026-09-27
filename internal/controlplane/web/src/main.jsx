@@ -3,7 +3,7 @@ import { State, friendlyName, relativeTime } from "./task-display.jsx";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/manrope";
-import { Activity, BarChart3, Bot, GitBranch, LayoutDashboard, Moon, Play, Plus, Server, Settings, Sun, Table2, TimerReset, X } from "lucide-react";
+import { Activity, BarChart3, Bot, GitBranch, KeyRound, LayoutDashboard, Moon, Play, Plug, Plus, Server, Settings, Sun, Table2, TimerReset, X } from "lucide-react";
 import { Analytics } from "@/analytics";
 import { CommandsPage, WorkersPage } from "@/catalog";
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +13,8 @@ import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
 import { boardColumns, currentRun, filterJobs, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
+import { ConnectionsPage } from "@/connections.jsx";
+import { expiredConnections } from "@/connections";
 import { SettingsPage } from "@/settings.jsx";
 import { createStatusLoader } from "@/status-loader";
 import { TriggersPage } from "@/triggers";
@@ -20,7 +22,7 @@ import "./styles.css";
 
 
 function App() {
-  const [status, setStatus] = useState({ jobs: [], workers: [], commands: [], repositories: [], triggers: [], csrf_token: "" });
+  const [status, setStatus] = useState({ jobs: [], workers: [], commands: [], repositories: [], triggers: [], connections: [], csrf_token: "" });
   const [selection, setSelection] = useState("");
   const [repository, setRepository] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -99,6 +101,7 @@ function App() {
   const visibleJobs = useMemo(() => filterJobs(status.jobs, filter), [filter, status.jobs]);
 
   const connectedWorkers = status.workers.filter((worker) => worker.connected).length;
+  const expired = useMemo(() => expiredConnections(status.connections), [status.connections]);
   const selectedJob = route.jobID ? status.jobs.find((job) => job.id === route.jobID) : undefined;
 
   async function submit(event) {
@@ -175,6 +178,7 @@ function App() {
           <a href="#/workers" aria-current={view === "workers" ? "page" : undefined} className={cn("nav-item", view === "workers" && "nav-item-active")}><Server className="size-4" /><span>Workers</span></a>
           <a href="#/triggers" aria-current={view === "triggers" ? "page" : undefined} className={cn("nav-item", view === "triggers" && "nav-item-active")}><TimerReset className="size-4" /><span>Triggers</span><span className="ml-auto text-xs text-muted-foreground">{status.triggers?.length || 0}</span></a>
           <a href="#/workflows" aria-current={["commands", "workflows"].includes(view) ? "page" : undefined} className={cn("nav-item", ["commands", "workflows"].includes(view) && "nav-item-active")}><Bot className="size-4" /><span>Workflows</span></a>
+          <a href="#/connections" aria-current={view === "connections" ? "page" : undefined} className={cn("nav-item", view === "connections" && "nav-item-active")}><Plug className="size-4" /><span>Connections</span>{expired.length > 0 && <span className="ml-auto text-xs text-danger">{expired.length}</span>}</a>
           <a href="#/settings" aria-current={view === "settings" ? "page" : undefined} className={cn("nav-item", view === "settings" && "nav-item-active")}><Settings className="size-4" /><span>Settings</span></a>
         </nav>
         <div className="hidden border-t border-border pt-3 md:block">
@@ -189,7 +193,7 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : view === "settings" ? <SettingsPage csrfToken={status.csrf_token} /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : view === "settings" ? <SettingsPage csrfToken={status.csrf_token} /> : view === "connections" ? <ConnectionsPage csrfToken={status.csrf_token} /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
           <PageHeading title="Tasks" description="Describe the work. Review the result.">
             <div className="flex items-center gap-2">
               <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New task</Button>
@@ -215,7 +219,7 @@ function App() {
               </div>
             </div>
 
-            {runsView === "board" ? <RunBoard jobs={visibleJobs} /> : <Card className="overflow-hidden">
+            {runsView === "board" ? <RunBoard jobs={visibleJobs} expired={expired} /> : <Card className="overflow-hidden">
               {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} />) : <EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} />}
             </Card>}
           </section>
@@ -248,16 +252,18 @@ function RunComposer({ title,setTitle,sourceURL,setSourceURL,choices,repositorie
   </Card>;
 }
 
-function RunBoard({ jobs }) {
+function RunBoard({ jobs, expired }) {
   const groupedJobs = groupJobsByBoardColumn(jobs);
+  const extra = (column) => column === "attention" ? expired.length : 0;
   return <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
     {boardColumns.map((column) => <section key={column.id} className="run-column min-w-0 border border-border bg-muted/20" aria-labelledby={`board-${column.id}`}>
       <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
         <div className="min-w-0"><h2 id={`board-${column.id}`} className="text-sm font-semibold">{column.title}</h2><p className="break-words text-xs text-muted-foreground">{column.description}</p></div>
-        <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${groupedJobs[column.id].length} visible ${column.title.toLowerCase()} runs`}>{groupedJobs[column.id].length}</Badge>
+        <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${groupedJobs[column.id].length + extra(column.id)} visible ${column.title.toLowerCase()} items`}>{groupedJobs[column.id].length + extra(column.id)}</Badge>
       </header>
       <div className="grid min-w-0 gap-2 p-2">
-        {groupedJobs[column.id].length ? groupedJobs[column.id].map((job) => <RunCard key={job.id} job={job} />) : <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
+        {column.id === "attention" && expired.map((connection) => <ConnectionCard key={`${connection.worker}/${connection.executor}`} connection={connection} />)}
+        {groupedJobs[column.id].length ? groupedJobs[column.id].map((job) => <RunCard key={job.id} job={job} />) : !extra(column.id) && <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
       </div>
     </section>)}
   </div>;
@@ -270,6 +276,14 @@ function RunCard({ job }) {
     <p className="line-clamp-2 text-sm font-medium leading-5">{title}</p>
     <p className="text-xs text-muted-foreground">{job.repository} · {friendlyName(run?.command || job.command)}</p>
     <State value={job.state} />
+  </a></Card>;
+}
+
+// An expired login blocks new runs for that executor until someone reconnects it.
+function ConnectionCard({ connection }) {
+  return <Card className="overflow-hidden border-danger/35"><a href="#/connections" className="block min-w-0 space-y-2 p-4 transition hover:bg-muted/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/50" aria-label={`Reconnect ${connection.executor} on ${connection.worker}`}>
+    <p className="flex items-center gap-2 text-sm font-medium"><KeyRound className="size-4 text-danger" />{connection.executor} login expired</p>
+    <p className="text-xs text-muted-foreground">{connection.worker} · new runs for {connection.executor} wait until you reconnect.</p>
   </a></Card>;
 }
 

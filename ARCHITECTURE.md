@@ -11,7 +11,9 @@ Commands own the work inside each step.
   process tree on timeout or cancellation.
 - `internal/controlplane` stores jobs and execution attempts, leases work to a capable worker,
   rejects stale completions, and exposes authenticated APIs and the web UI.
-- `internal/managedworker` resolves only worker-owned executor and repository names.
+- `internal/managedworker` resolves only worker-owned executor and repository names. Its
+  auth broker runs worker-owned login and status recipes for the
+  [Connections](docs/connections.md) page; credentials never leave the worker.
 
 Single-command jobs have one run and retain process-result semantics. Workflow
 jobs snapshot an ordered command list and create one run per step attempt.

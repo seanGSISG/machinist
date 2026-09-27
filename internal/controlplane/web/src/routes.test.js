@@ -9,6 +9,7 @@ test("routeFromHash recognizes task detail routes", () => {
 
 test("routeFromHash recognizes the settings page", () => {
   assert.deepEqual(routeFromHash("#/settings"), { view: "settings", jobID: "" });
+  assert.deepEqual(routeFromHash("#/connections"), { view: "connections", jobID: "" });
 });
 
 test("routeFromHash falls back to runs for incomplete or malformed routes", () => {
