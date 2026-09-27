@@ -178,6 +178,12 @@ func TestStatusCheckReportsConnectedExpiringExpiredAndUnknown(t *testing.T) {
 	if state, _, _ := checkStatus(context.Background(), recipe, environment, pastExpiry); state != protocol.AuthExpired {
 		t.Fatalf("past expiry status = %q", state)
 	}
+	// A script whose interpreter is not on the auth path (the node pitfall).
+	writeFakeCLI(t, bin, "needs-runtime", "#!/usr/bin/env machinist-missing-runtime\n")
+	recipe.Status = []string{"needs-runtime"}
+	if state, detail, _ := checkStatus(context.Background(), recipe, environment, now); state != protocol.AuthUnknown || !strings.Contains(detail, "code 127") || !strings.Contains(detail, "path") {
+		t.Fatalf("missing runtime status = %q %q", state, detail)
+	}
 	recipe.Status = []string{"missing-status-command"}
 	if state, detail, _ := checkStatus(context.Background(), recipe, environment, now); state != protocol.AuthUnknown || !strings.Contains(detail, "not found") {
 		t.Fatalf("missing command status = %q %q", state, detail)

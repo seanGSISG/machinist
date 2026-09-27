@@ -3,6 +3,12 @@
 # define. The executor commands below are placeholders for this example.
 # Status commands were checked on 2026-09-27; confirm the login patterns with
 # a first Connect before relying on them.
+#
+# Recipes run with a minimal environment: PATH is the recipe's `path`, or the
+# worker's PATH when unset. CLIs installed with npm (codex, pi) are
+# "#!/usr/bin/env node" scripts, so `path` must also contain the directory
+# that holds `node`, or every status check fails with exit code 127.
+# Replace /absolute/path/to/... with real directories.
 
 [executors.claude.auth]
 login = ["claude", "auth", "login", "--claudeai"]
@@ -15,7 +21,10 @@ login = ["codex", "login", "--device-auth"]
 status = ["codex", "login", "status"]
 connected_pattern = 'Logged in using'
 code_pattern = '\b([A-Z0-9]{4,}-[A-Z0-9]{4,})\b'
+path = "/absolute/path/to/cli/bin:/absolute/path/to/node/bin:/usr/local/bin:/usr/bin:/bin"
 
+# kimi and omp have no status command: they stay "unknown" and are never
+# blocked. Connect still works.
 [executors.kimi]
 command = ["kimi", "--print"]
 
@@ -36,6 +45,9 @@ command = ["opencode", "run"]
 [executors.opencode.auth]
 login = ["opencode", "auth", "login"]
 status = ["opencode", "auth", "list"]
+# `opencode auth list` exits 0 even with no credentials, so require at least
+# one credential line such as "OpenAI oauth" or "Anthropic api".
+connected_pattern = '(?m)\b(oauth|api)\s*$'
 
 [executors.pi]
 command = ["pi", "-p"]
@@ -43,5 +55,11 @@ command = ["pi", "-p"]
 [executors.pi.auth]
 login = ["pi"]
 start_input = ["/login\r"]
-status = ["pi", "auth", "check", "--provider", "anthropic", "--json", "--no-refresh"]
 prompt_pattern = '(?i)(paste|enter).{0,40}(code|url)'
+path = "/absolute/path/to/cli/bin:/absolute/path/to/node/bin:/usr/local/bin:/usr/bin:/bin"
+# pi checks one provider at a time. Uncomment and replace PROVIDER with the
+# provider this executor runs on (`pi auth check` exits 1 for any provider
+# that is not logged in, which would mark pi expired and hold its runs).
+# Until then pi stays "unknown" and is never blocked.
+# status = ["pi", "auth", "check", "--provider", "PROVIDER", "--json", "--no-refresh"]
+# connected_pattern = '"status":\s*"ready"'

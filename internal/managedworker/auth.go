@@ -256,9 +256,12 @@ func (a *authAgent) start(ctx context.Context, action protocol.LoginAction) {
 		state := session.state
 		session.mu.Unlock()
 		fmt.Fprintf(a.stderr, "machinist: login %s for %s: %s\n", session.id, session.executor, state)
-		// Re-check right away so the new credentials show up.
+		// Re-check right away so the new credentials show up. Check every
+		// executor: several can share one CLI login (claude and claude-opus).
 		a.mu.Lock()
-		a.nextCheck[session.executor] = time.Time{}
+		for name := range a.recipes {
+			a.nextCheck[name] = time.Time{}
+		}
 		a.mu.Unlock()
 		a.notify()
 	}()
@@ -331,6 +334,12 @@ func checkStatus(ctx context.Context, recipe config.AuthRecipe, environment logi
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
+		// 126/127 mean the command or its interpreter (for example node in a
+		// "#!/usr/bin/env node" script) was not found on the auth path: a
+		// recipe problem, not a logged-out CLI, so it must not block runs.
+		if code := exitErr.ExitCode(); code == 126 || code == 127 {
+			return protocol.AuthUnknown, fmt.Sprintf("status check exited with code %d: the command or its runtime was not found; check the recipe's path", code), nil
+		}
 		return protocol.AuthExpired, fmt.Sprintf("status check exited with code %d", exitErr.ExitCode()), nil
 	}
 	if err != nil {

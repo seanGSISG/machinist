@@ -51,6 +51,9 @@ func TestConnectFromTheWebAPIRunsTheWorkerRecipe(t *testing.T) {
 		Executors: map[string]config.Executor{"fake": {Command: []string{"fake"}, Auth: &config.ExecutorAuth{
 			Login: []string{"fake-login"}, Status: []string{"fake-status"}, Path: bin + ":/usr/bin:/bin",
 			ConnectedPattern: `"loggedIn": true`, CodePattern: `device code: ([A-Z0-9-]+)`, PromptPattern: `Paste code here`,
+		}}, "fake-opus": {Command: []string{"fake"}, Auth: &config.ExecutorAuth{
+			// Shares fake's login: status only, no Connect button.
+			Status: []string{"fake-status"}, Path: bin + ":/usr/bin:/bin", ConnectedPattern: `"loggedIn": true`,
 		}}},
 	}
 	client, err := NewClient(workerConfig)
@@ -68,17 +71,21 @@ func TestConnectFromTheWebAPIRunsTheWorkerRecipe(t *testing.T) {
 	go func() { agent.run(ctx); close(done) }()
 	defer func() { cancel(); <-done }()
 
-	connection := func() map[string]any {
+	connectionFor := func(executor string) map[string]any {
 		var body struct {
 			Connections []map[string]any `json:"connections"`
 		}
 		request(t, http.MethodGet, web.URL+"/api/v1/connections", nil, nil, &body)
-		if len(body.Connections) != 1 {
-			return nil
+		for _, c := range body.Connections {
+			if c["executor"] == executor {
+				return c
+			}
 		}
-		return body.Connections[0]
+		return nil
 	}
+	connection := func() map[string]any { return connectionFor("fake") }
 	eventually(t, "status check reports expired", func() bool { c := connection(); return c != nil && c["state"] == "expired" })
+	eventually(t, "shared executor reports expired", func() bool { c := connectionFor("fake-opus"); return c != nil && c["state"] == "expired" })
 
 	var status struct {
 		CSRFToken string `json:"csrf_token"`
@@ -117,6 +124,8 @@ func TestConnectFromTheWebAPIRunsTheWorkerRecipe(t *testing.T) {
 		t.Fatalf("transcript = %q", transcript)
 	}
 	eventually(t, "status is re-checked after login", func() bool { c := connection(); return c != nil && c["state"] == "connected" })
+	// fake-opus's next scheduled check is minutes away; the login re-checks it too.
+	eventually(t, "executors sharing the login are re-checked", func() bool { c := connectionFor("fake-opus"); return c != nil && c["state"] == "connected" })
 	if strings.Contains(logs.String(), "sekrit") || strings.Contains(logs.String(), "WXYZ") || strings.Contains(logs.String(), "https://") {
 		t.Fatalf("worker logs leak login details:\n%s", logs.String())
 	}

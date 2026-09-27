@@ -36,12 +36,45 @@ prompt_pattern = '(?i)paste\s+(the\s+)?code'
 | `code_pattern` | none | Regex for a device code (first group, or the whole match). |
 | `prompt_pattern` | none | Regex that means the CLI is waiting for a pasted code. |
 | `start_input` | none | Strings typed after start, for TUIs whose login is a slash command (`["/login\r"]`). |
-| `path` | worker's `PATH` | `PATH` for the login and status commands. |
+| `path` | worker's `PATH` | `PATH` for the login and status commands. Must include the runtime of script CLIs (see below). |
 | `timeout` | `10m` | Login time limit (30s to 1h). The terminal is killed when it expires. |
 | `status_interval` | `5m` | How often the status command runs (at least 30s). |
 
 A recipe may define only `status` (health checks, no Connect button) or only
 `login` (always *unknown*, never gated).
+
+### `path` must cover the CLI's runtime
+
+Recipes run with a minimal environment (see [The login flow](#the-login-flow)),
+so `PATH` is exactly `path`, or the worker's own `PATH` when `path` is unset.
+CLIs installed with npm, such as `codex` and `pi`, are `#!/usr/bin/env node`
+scripts. If the directory holding `node` is not on that `PATH`, the status
+check fails with `/usr/bin/env: 'node': No such file or directory` (exit code
+127) even though the CLI is logged in. Put both directories in `path`:
+
+```toml
+path = "/opt/machinist/bin:/opt/machinist/toolchains/node-v22.22.2-linux-x64/bin:/usr/local/bin:/usr/bin:/bin"
+```
+
+A status command that exits 126 or 127 (command or runtime not found) is
+reported as *unknown* with a hint to check `path`, not as *expired*, so a
+recipe mistake never holds runs.
+
+### Executors that share one login
+
+Several executors often wrap the same CLI with different models (`claude` and
+`claude-opus`; `codex`, `codex-sol` and `codex-pool`). They share that CLI's
+credentials, so:
+
+- Put `login` on **one** executor per CLI (the plain `claude`, `codex`). That
+  gives one Connect button per login and no two logins racing to write the
+  same credential file.
+- Put the same `status` (and `path`, `connected_pattern`) on **every**
+  executor that shares the login, so each one is gated when the login
+  expires. The status commands only read local state, so the extra checks
+  are cheap.
+- When any login ends, the worker re-checks every executor at once, so the
+  executors sharing that login turn *connected* together.
 
 ## States and gating
 
@@ -53,12 +86,22 @@ each login. It reports one state per executor:
 | connected | Status exited 0 (and matched `connected_pattern`, if set). |
 | expiring | Connected, but `expires_pattern` found an expiry inside `expiring_within`. |
 | expired | Status exited non-zero, did not match `connected_pattern`, or the expiry has passed. |
-| unknown | No status command, it could not start, or it timed out (30s). |
+| unknown | No status command yet (including before the first check), it could not start, exited 126/127, or timed out (30s). |
 
 An **expired** executor appears in the *Needs attention* column of the Tasks
 board, and the control plane does not lease new runs for it to that worker.
 Queued runs wait until someone reconnects. Running runs are not interrupted.
 *Unknown* and *expiring* executors are still leased.
+
+Every executor starts as *unknown* until its first status check finishes
+(normally within seconds of worker start). A run leased in that window can go
+to an executor whose login has in fact expired; it fails like any run with a
+logged-out CLI. This window is accepted rather than blocking every run until
+the first check.
+
+CLIs without a status command (kimi and omp today) stay *unknown*: they are
+never blocked, and a logged-out CLI shows up only as failed runs. Connect
+still works for them.
 
 ## The login flow
 
@@ -123,10 +166,91 @@ Connect and adjust it. The full set is in
 |---|---|---|---|
 | claude | `claude auth login --claudeai` | link + paste-back code | `claude auth status` (JSON `loggedIn`) |
 | codex | `codex login --device-auth` | device code | `codex login status` ("Logged in using ...") |
-| kimi | `kimi login --region global` | device code | none yet |
-| omp | `omp login anthropic` | provider OAuth, link + paste | none yet |
-| opencode | `opencode auth login` | provider picker, then OAuth | `opencode auth list` |
-| pi | TUI `/login` via `start_input` | provider picker, then OAuth | `pi auth check --provider anthropic --json --no-refresh` |
+| kimi | `kimi login --region global` | device code | none (stays *unknown*) |
+| omp | `omp login anthropic` | provider OAuth, link + paste | none (stays *unknown*) |
+| opencode | `opencode auth login` | provider picker, then OAuth | `opencode auth list` (at least one `oauth`/`api` line) |
+| pi | TUI `/login` via `start_input` | provider picker, then OAuth | `pi auth check --provider PROVIDER --json --no-refresh` |
+
+Notes on the status commands:
+
+- `codex login status` prints `Logged in using ChatGPT` and exits 0. It needs
+  `node` on `path`, as does pi.
+- `opencode auth list` exits 0 even with no credentials, so the recipe's
+  `connected_pattern` requires at least one credential line (for example
+  `OpenAI oauth`).
+- `pi auth check` checks **one provider**. It prints `{"status":"ready",...}`
+  and exits 0 when that provider is logged in, and
+  `{"status":"not_ready","reason":"credentials_not_configured"}` with exit 1
+  when it is not. Set `--provider` to the provider the executor actually uses
+  (`pi`'s `defaultProvider` is not necessarily the logged-in one). A provider
+  that was never configured marks pi *expired* and holds its runs, so the
+  example leaves pi's `status` commented out until you replace `PROVIDER`.
+
 
 For pickers (opencode, pi), type the provider name in the box and send it, or
 use the arrow and Enter buttons; the redacted terminal output shows the menu.
+
+## Example: a worker with shared logins
+
+A worker whose executors are all wrapped as `/opt/machinist/bin/agent-run --
+<cli> ...`, with the CLIs in `/opt/machinist/bin` and node in a private
+toolchain directory. The recipes call the CLIs directly; `agent-run` only
+wraps agent runs. Executor `command` lines are omitted.
+
+```toml
+[executors.claude.auth]
+login = ["claude", "auth", "login", "--claudeai"]
+status = ["claude", "auth", "status"]
+connected_pattern = '"loggedIn":\s*true'
+prompt_pattern = '(?i)paste\s+(the\s+)?code'
+path = "/opt/machinist/bin:/usr/local/bin:/usr/bin:/bin"
+
+[executors.claude-opus.auth]  # shares claude's login
+status = ["claude", "auth", "status"]
+connected_pattern = '"loggedIn":\s*true'
+path = "/opt/machinist/bin:/usr/local/bin:/usr/bin:/bin"
+
+[executors.codex.auth]
+login = ["codex", "login", "--device-auth"]
+status = ["codex", "login", "status"]
+connected_pattern = 'Logged in using'
+code_pattern = '\b([A-Z0-9]{4,}-[A-Z0-9]{4,})\b'
+path = "/opt/machinist/bin:/opt/machinist/toolchains/node-v22.22.2-linux-x64/bin:/usr/local/bin:/usr/bin:/bin"
+
+[executors.codex-sol.auth]  # shares codex's login
+status = ["codex", "login", "status"]
+connected_pattern = 'Logged in using'
+path = "/opt/machinist/bin:/opt/machinist/toolchains/node-v22.22.2-linux-x64/bin:/usr/local/bin:/usr/bin:/bin"
+
+[executors.codex-pool.auth]  # shares codex's login
+status = ["codex", "login", "status"]
+connected_pattern = 'Logged in using'
+path = "/opt/machinist/bin:/opt/machinist/toolchains/node-v22.22.2-linux-x64/bin:/usr/local/bin:/usr/bin:/bin"
+
+[executors.pi.auth]
+login = ["pi"]
+start_input = ["/login\r"]
+status = ["pi", "auth", "check", "--provider", "openai-codex", "--json", "--no-refresh"]
+connected_pattern = '"status":\s*"ready"'
+prompt_pattern = '(?i)(paste|enter).{0,40}(code|url)'
+path = "/opt/machinist/bin:/opt/machinist/toolchains/node-v22.22.2-linux-x64/bin:/usr/local/bin:/usr/bin:/bin"
+
+[executors.omp.auth]  # no status command: stays unknown, never blocked
+login = ["omp", "login", "anthropic"]
+prompt_pattern = '(?i)(paste|enter).{0,40}(code|url)'
+path = "/opt/machinist/bin:/opt/machinist/toolchains/node-v22.22.2-linux-x64/bin:/usr/local/bin:/usr/bin:/bin"
+
+[executors.opencode.auth]
+login = ["opencode", "auth", "login"]
+status = ["opencode", "auth", "list"]
+connected_pattern = '(?m)\b(oauth|api)\s*$'
+path = "/opt/machinist/bin:/opt/machinist/toolchains/node-v22.22.2-linux-x64/bin:/usr/local/bin:/usr/bin:/bin"
+
+[executors.kimi.auth]  # no status command: stays unknown, never blocked
+login = ["kimi", "login", "--region", "global"]
+code_pattern = '\b([A-Z0-9]{4,}-[A-Z0-9]{4,})\b'
+path = "/opt/machinist/bin:/usr/local/bin:/usr/bin:/bin"
+```
+
+Set pi's `--provider` to the provider its executor runs on; `openai-codex` is
+an example of a provider that is logged in.
