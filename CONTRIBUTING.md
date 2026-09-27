@@ -34,7 +34,7 @@ just check
 ```
 
 CI separately proves that Go formatting is current without changing files,
-runs `go vet`, runs the Go suite with the race detector on Linux and macOS,
+runs `go vet`, runs the Go suite with the race detector on Linux,
 tests and builds the frontend,
 and builds one `bin/machinist` executable.
 
