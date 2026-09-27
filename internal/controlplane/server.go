@@ -247,6 +247,7 @@ func (s *Server) runScheduler(ctx context.Context) error {
 		})
 	}
 	loop(true, s.maintainState)
+	loop(true, func(ctx context.Context) error { return s.pruneRetention(ctx, s.now().UTC()) })
 	loop(true, s.store.CleanupArtifacts)
 	<-ctx.Done()
 	schedulers.Wait()
@@ -347,10 +348,6 @@ func (s *Server) definitions(response http.ResponseWriter, request *http.Request
 }
 
 func (s *Server) status(response http.ResponseWriter, request *http.Request) {
-	if err := s.maintainState(request.Context()); err != nil {
-		writeError(response, http.StatusInternalServerError, err)
-		return
-	}
 	snapshot, err := s.store.Snapshot(request.Context())
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
