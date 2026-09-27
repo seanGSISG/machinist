@@ -801,8 +801,15 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	defer tx.Rollback()
 	nowTime := s.now().UTC()
 	now := nowTime.Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO workers(instance_id,name,last_seen_at) VALUES(?,?,?) ON CONFLICT(instance_id) DO UPDATE SET name=excluded.name,last_seen_at=excluded.last_seen_at`, request.InstanceID, request.Name, now); err != nil {
+	incarnation, currentProcess, err := registerWorkerProcess(ctx, tx, request, now)
+	if err != nil {
 		return nil, fmt.Errorf("update worker: %w", err)
+	}
+	if !currentProcess {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, nil
 	}
 	if _, err := reclaimLeases(ctx, tx, nowTime); err != nil {
 		return nil, fmt.Errorf("reclaim expired leases: %w", err)
@@ -822,7 +829,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	if err := recordWorkerExecutors(ctx, tx, request); err != nil {
 		return nil, err
 	}
-	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,lease_token FROM runs WHERE worker_instance=? AND state='running' LIMIT 1`, request.InstanceID))
+	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,lease_token,COALESCE(incarnation,0) FROM runs WHERE worker_instance=? AND state='running' AND COALESCE(incarnation,0)=? LIMIT 1`, request.InstanceID, incarnation))
 	if err == nil {
 		var activeWorkflow bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_jobs WHERE job_id=?)`, active.JobID).Scan(&activeWorkflow); err != nil {
@@ -945,7 +952,8 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 		return nil, err
 	}
 	expiresAt := nowTime.Add(leaseDuration).UnixNano()
-	result, err := tx.ExecContext(ctx, `UPDATE runs SET state='running',worker_instance=?,worker_name=?,lease_token=?,lease_expires_at=?,started_at=? WHERE id=? AND state='queued'`, request.InstanceID, request.Name, selected.LeaseToken, expiresAt, now, selected.ID)
+	selected.Incarnation = incarnation
+	result, err := tx.ExecContext(ctx, `UPDATE runs SET state='running',worker_instance=?,worker_name=?,lease_token=?,lease_expires_at=?,started_at=?,incarnation=? WHERE id=? AND state='queued'`, request.InstanceID, request.Name, selected.LeaseToken, expiresAt, now, incarnation, selected.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -1338,7 +1346,7 @@ func (s *Store) listWorkers(ctx context.Context) ([]Worker, error) {
 
 func scanRunSpec(row *sql.Row) (protocol.RunSpec, error) {
 	var run protocol.RunSpec
-	err := row.Scan(&run.ID, &run.JobID, &run.Command, &run.CommandHash, &run.Executor, &run.Model, &run.Repository, &run.RenderedPrompt, &run.TimeoutMillis, &run.LeaseToken)
+	err := row.Scan(&run.ID, &run.JobID, &run.Command, &run.CommandHash, &run.Executor, &run.Model, &run.Repository, &run.RenderedPrompt, &run.TimeoutMillis, &run.LeaseToken, &run.Incarnation)
 	return run, err
 }
 
