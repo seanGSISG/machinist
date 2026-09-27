@@ -5,6 +5,7 @@ Start with [your first task workflow](task-guide.md) to run a task, review its f
 - [Configuration and migration](configuration.md)
 - [Accepted task, stage, and artifact model](task-artifact-model.md)
 - [Current workflow configuration](workflows.md)
+- [Settings in the web UI](settings-ui.md): command, workflow, and executor defaults stored with history
 - [Workflow roadmap: scaling AI engineering](workflow-roadmap.md)
 - [Architecture](../ARCHITECTURE.md)
 - [VM deployment](vm-deployment.md)

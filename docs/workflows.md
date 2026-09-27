@@ -41,7 +41,8 @@ Commands reference `{{task.source_url}}` and `{{task.spec}}`. Existing
 
 Workflow templates are saved at submission. Each attempt snapshots the task and
 the shared-folder snapshot; the worker renders local paths at execution.
-Editing configuration does not change a submitted workflow.
+Editing configuration does not change a submitted workflow. Commands, workflows,
+and executor default models can also be edited in the web UI; see [Settings](settings-ui.md).
 See [Artifact workflows](artifacts.md) for passing files between stages.
 
 Legacy `--prompt` workflow submissions are accepted as task specs. They use the
