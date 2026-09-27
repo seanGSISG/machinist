@@ -303,8 +303,8 @@ func TestManagedWorkerPollsAgainAfterCompletionConflict(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("worker returned error: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "machinist: report run run-test: control plane returned HTTP 409 Conflict") {
-		t.Fatalf("completion conflict was not logged: %q", stderr.String())
+	if stderr.String() != "" {
+		t.Fatalf("completion conflict produced failure output: %q", stderr.String())
 	}
 }
 
@@ -523,5 +523,80 @@ func TestWorkflowStopsProcessAfterLeaseRejection(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("workflow kept executing after definitive lease rejection")
+	}
+}
+
+func TestWorkerTerminalOn404(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusConflict} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var polls atomic.Int32
+			var heartbeats atomic.Int32
+			var completions atomic.Int32
+			polledAgain := make(chan struct{})
+			var polledAgainOnce sync.Once
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/api/v1/workers/poll":
+					if polls.Add(1) == 1 {
+						_ = json.NewEncoder(response).Encode(protocol.PollResponse{Run: &protocol.RunSpec{ID: "run-test", LeaseToken: "lease-test"}})
+						return
+					}
+					polledAgainOnce.Do(func() { close(polledAgain) })
+					_ = json.NewEncoder(response).Encode(protocol.PollResponse{})
+				case "/api/v1/runs/run-test/heartbeat":
+					heartbeats.Add(1)
+					response.WriteHeader(status)
+				case "/api/v1/runs/run-test/complete":
+					completions.Add(1)
+					response.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(response, request)
+				}
+			}))
+			defer server.Close()
+
+			ticks := make(chan time.Time, 2)
+			started := make(chan struct{})
+			stopped := make(chan struct{})
+			worker := &Worker{
+				config:         config.Worker{ControlPlane: config.ControlPlane{URL: server.URL}},
+				instanceID:     "worker-test",
+				client:         newClient(server.URL, "secret", server.Client()),
+				stderr:         io.Discard,
+				heartbeatTicks: ticks,
+				executeRun: func(ctx context.Context, _ protocol.RunSpec) protocol.Completion {
+					close(started)
+					<-ctx.Done()
+					close(stopped)
+					return protocol.Completion{State: "cancelled", ExitCode: 130}
+				},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- worker.Run(ctx) }()
+			<-started
+			ticks <- time.Now()
+			select {
+			case <-stopped:
+			case <-time.After(3 * time.Second):
+				t.Fatal("worker process did not stop after terminal heartbeat")
+			}
+			select {
+			case <-polledAgain:
+			case <-time.After(3 * time.Second):
+				t.Fatal("worker did not leave the terminal run")
+			}
+			ticks <- time.Now()
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if got := heartbeats.Load(); got != 1 {
+				t.Fatalf("heartbeats = %d, want 1", got)
+			}
+			if got := completions.Load(); got != 0 {
+				t.Fatalf("completion requests = %d, want 0", got)
+			}
+		})
 	}
 }

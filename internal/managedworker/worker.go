@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -95,14 +96,15 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		completion := w.executeWithHeartbeats(ctx, *run)
+		completion, terminal := w.executeWithHeartbeatsResult(ctx, *run)
+		if terminal {
+			continue
+		}
 		if err := w.deliverWithHeartbeats(ctx, *run, completion); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			var responseErr *ResponseError
-			if errors.As(err, &responseErr) && responseErr.Status == 409 {
-				fmt.Fprintf(w.stderr, "machinist: report run %s: %v\n", run.ID, err)
+			if terminalResponse(err) {
 				continue
 			}
 			return err
@@ -111,6 +113,11 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) executeWithHeartbeats(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
+	completion, _ := w.executeWithHeartbeatsResult(ctx, spec)
+	return completion
+}
+
+func (w *Worker) executeWithHeartbeatsResult(ctx context.Context, spec protocol.RunSpec) (protocol.Completion, bool) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	execute := w.executeRun
@@ -123,14 +130,23 @@ func (w *Worker) executeWithHeartbeats(ctx context.Context, spec protocol.RunSpe
 func (w *Worker) deliverWithHeartbeats(ctx context.Context, spec protocol.RunSpec, completion protocol.Completion) error {
 	if err := w.heartbeat(ctx, spec); err != nil {
 		fmt.Fprintf(w.stderr, "machinist: heartbeat run %s before completion: %v\n", spec.ID, err)
+		if terminalResponse(err) {
+			return nil
+		}
 	}
-	return withHeartbeats(ctx, w, spec, " during completion", func() error { return w.deliver(ctx, spec.ID, completion) })
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	err, terminal := withHeartbeats(ctx, w, spec, " during completion", func() error { return w.deliver(ctx, spec.ID, completion) }, cancel)
+	if terminal {
+		return nil
+	}
+	return err
 }
 
 // withHeartbeats runs work in the background and keeps the run lease alive
 // until it returns. Cancellation does not abandon the work; the work observes
 // ctx itself and its result is always returned.
-func withHeartbeats[T any](ctx context.Context, w *Worker, spec protocol.RunSpec, phase string, work func() T, stop ...context.CancelFunc) T {
+func withHeartbeats[T any](ctx context.Context, w *Worker, spec protocol.RunSpec, phase string, work func() T, stop ...context.CancelFunc) (T, bool) {
 	ticks := w.heartbeatTicks
 	if ticks == nil {
 		ticker := time.NewTicker(heartbeatInterval)
@@ -142,19 +158,24 @@ func withHeartbeats[T any](ctx context.Context, w *Worker, spec protocol.RunSpec
 	for {
 		select {
 		case result := <-done:
-			return result
+			return result, false
 		case <-ticks:
 			if err := w.heartbeat(ctx, spec); err != nil {
 				fmt.Fprintf(w.stderr, "machinist: heartbeat run %s%s: %v\n", spec.ID, phase, err)
-				var responseErr *ResponseError
-				if spec.Workflow && len(stop) > 0 && errors.As(err, &responseErr) && (responseErr.Status == 409 || responseErr.Status == 404) {
+				if len(stop) > 0 && terminalResponse(err) {
 					stop[0]()
+					return <-done, true
 				}
 			}
 		case <-ctx.Done():
-			return <-done
+			return <-done, false
 		}
 	}
+}
+
+func terminalResponse(err error) bool {
+	var responseErr *ResponseError
+	return errors.As(err, &responseErr) && (responseErr.Status == http.StatusNotFound || responseErr.Status == http.StatusConflict)
 }
 
 func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
