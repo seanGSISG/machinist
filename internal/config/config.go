@@ -49,6 +49,7 @@ type ControlPlane struct {
 type Executor struct {
 	Command []string          `toml:"command"`
 	Models  map[string]string `toml:"models"`
+	Auth    *ExecutorAuth     `toml:"auth"`
 }
 
 func (e Executor) supportsModel() bool {
@@ -534,6 +535,11 @@ func applyWorkerDefaultsWithHostname(worker Worker, getHostname func() (string, 
 		}
 		if len(executor.Models) > 0 && !executor.supportsModel() {
 			return Worker{}, fmt.Errorf("executor %q defines models but its command does not contain %s", name, modelParameter)
+		}
+		if executor.Auth != nil {
+			if _, err := executor.Auth.resolve(name); err != nil {
+				return Worker{}, fmt.Errorf("executor %q auth: %w", name, err)
+			}
 		}
 	}
 	return worker, nil
