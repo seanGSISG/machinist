@@ -366,7 +366,19 @@ func (c Config) ResolveCommand(name string) (ResolvedCommand, error) {
 	return resolveCommand(c.path, name, command)
 }
 
-func LoadDefinitions(path string) (Config, error) { return loadConfigFile(path) }
+// LoadDefinitions returns the usable entries in a definition file. Call
+// ValidateFile when diagnostics for excluded entries are required.
+func LoadDefinitions(path string) (Config, error) {
+	report, err := ValidateFile(path)
+	if err == nil {
+		for _, invalid := range report.InvalidCommands {
+			if invalid.kind == "workflow" {
+				return Config{}, errors.New(invalid.Reason)
+			}
+		}
+	}
+	return report.Config, err
+}
 
 func resolveCommand(definitionPath, name string, command Command) (ResolvedCommand, error) {
 	if strings.TrimSpace(command.Executor) == "" {

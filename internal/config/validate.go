@@ -16,6 +16,7 @@ import (
 type InvalidCommand struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason"`
+	kind   string
 }
 
 // Report is the usable portion of a configuration and any entries that were
@@ -89,19 +90,20 @@ func ValidateFile(path string) (Report, error) {
 		Workflows: map[string]Workflow{}, path: absPath,
 	}
 	report := Report{Config: loaded, InvalidCommands: []InvalidCommand{}}
+	entryOffsets := configEntryOffsets(body)
 	for _, name := range sortedMapKeys(sections.Commands) {
 		rawEntry := sections.Commands[name]
 		var command Command
 		entryDecoder := toml.NewDecoder(bytes.NewReader(rawEntry))
 		entryDecoder.DisallowUnknownFields()
 		if err := entryDecoder.Decode(&command); err != nil {
-			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, name, err))
+			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, "command", name, entryOffsets[entryKey("commands", name)], err))
 			continue
 		}
 		report.Config.Commands[name] = command
 		if _, err := report.Config.ResolveCommand(name); err != nil {
 			delete(report.Config.Commands, name)
-			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, name, err))
+			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, "command", name, entryOffsets[entryKey("commands", name)], err))
 		}
 	}
 	for _, name := range sortedMapKeys(sections.Workflows) {
@@ -110,20 +112,20 @@ func ValidateFile(path string) (Report, error) {
 		entryDecoder := toml.NewDecoder(bytes.NewReader(rawEntry))
 		entryDecoder.DisallowUnknownFields()
 		if err := entryDecoder.Decode(&workflow); err != nil {
-			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, name, err))
+			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, "workflow", name, entryOffsets[entryKey("workflows", name)], err))
 			continue
 		}
 		report.Config.Workflows[name] = workflow
 		if _, err := report.Config.ResolveTaskWorkflow(name, ""); err != nil {
 			delete(report.Config.Workflows, name)
-			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, name, err))
+			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, "workflow", name, entryOffsets[entryKey("workflows", name)], err))
 		}
 	}
 	return report, nil
 }
 
-func invalidEntry(path string, body []byte, rawEntry unstable.RawMessage, name string, err error) InvalidCommand {
-	line, column := entryStart(body, rawEntry)
+func invalidEntry(path string, body []byte, rawEntry unstable.RawMessage, kind, name string, tableOffset int, err error) InvalidCommand {
+	line, column := entryStart(body, rawEntry, tableOffset)
 	var decodeErr *toml.DecodeError
 	if errors.As(err, &decodeErr) {
 		localLine, localColumn := decodeErr.Position()
@@ -131,15 +133,46 @@ func invalidEntry(path string, body []byte, rawEntry unstable.RawMessage, name s
 		column = localColumn
 	}
 	message := strings.TrimPrefix(err.Error(), "toml: ")
-	return InvalidCommand{Name: name, Reason: fmt.Sprintf("%s:%d:%d: %s", path, line, column, message)}
+	return InvalidCommand{Name: name, Reason: fmt.Sprintf("%s:%d:%d: %s", path, line, column, message), kind: kind}
 }
 
-func entryStart(body []byte, rawEntry unstable.RawMessage) (int, int) {
+func entryStart(body []byte, rawEntry unstable.RawMessage, tableOffset int) (int, int) {
 	entry := bytes.TrimLeft(rawEntry, " \t\r\n")
-	offset := bytes.Index(body, entry)
-	if offset < 0 {
+	if tableOffset < 0 || tableOffset >= len(body) {
+		tableOffset = 0
+	}
+	relativeOffset := bytes.Index(body[tableOffset:], entry)
+	if relativeOffset < 0 {
 		return 1, 1
 	}
+	offset := tableOffset + relativeOffset
 	lineStart := bytes.LastIndexByte(body[:offset], '\n') + 1
 	return bytes.Count(body[:offset], []byte{'\n'}) + 1, offset - lineStart + 1
 }
+
+func configEntryOffsets(body []byte) map[string]int {
+	offsets := map[string]int{}
+	parser := unstable.Parser{}
+	parser.Reset(body)
+	for parser.NextExpression() {
+		expression := parser.Expression()
+		if expression.Kind != unstable.Table {
+			continue
+		}
+		parts := []string{}
+		tableOffset := 0
+		keys := expression.Key()
+		for keys.Next() {
+			if len(parts) == 0 {
+				tableOffset = int(keys.Node().Raw.Offset)
+			}
+			parts = append(parts, string(keys.Node().Data))
+		}
+		if len(parts) == 2 && (parts[0] == "commands" || parts[0] == "workflows") {
+			offsets[entryKey(parts[0], parts[1])] = tableOffset
+		}
+	}
+	return offsets
+}
+
+func entryKey(section, name string) string { return section + "\x00" + name }
