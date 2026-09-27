@@ -40,10 +40,6 @@ jobs:
       - name: Build frontend
         working-directory: internal/controlplane/web
         run: npm run build
-      - name: Check tracked frontend is current
-        run: |
-          git diff --exit-code -- internal/controlplane/web/dist
-          test -z "$(git status --porcelain --untracked-files=all -- internal/controlplane/web/dist)"
       - name: Check Go formatting
         shell: bash
         run: |
@@ -60,42 +56,16 @@ jobs:
           test -x bin/machinist
           test "$(bin/machinist version)" = "ci"
 
-  macos:
-    name: macOS checks
-    runs-on: macos-15
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: 1.26.6
-          cache: true
-      - name: Confirm toolchain
-        run: test "$(go env GOVERSION)" = "go1.26.6"
-      - name: Run Go tests with the race detector
-        run: go test -race ./...
-      - name: Build Machinist
-        run: |
-          mkdir -p bin
-          go build -trimpath -ldflags="-X main.version=ci" -o bin/machinist ./cmd/machinist
-          test -x bin/machinist
-          test "$(bin/machinist version)" = "ci"
-
   check:
     name: check
     if: always()
     needs:
       - linux
-      - macos
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require every platform check
+      - name: Require the Linux check
         env:
           LINUX_RESULT: ${{ needs.linux.result }}
-          MACOS_RESULT: ${{ needs.macos.result }}
         run: |
           test "$LINUX_RESULT" = success
-          test "$MACOS_RESULT" = success

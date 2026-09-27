@@ -34,13 +34,14 @@ just check
 ```
 
 CI separately proves that Go formatting is current without changing files,
-runs `go vet`, runs the Go suite with the race detector on Linux and macOS,
-tests and builds the frontend, confirms the tracked frontend bundle is current,
+runs `go vet`, runs the Go suite with the race detector on Linux,
+tests and builds the frontend,
 and builds one `bin/machinist` executable.
 
-The frontend bundle under `internal/controlplane/web/dist` is committed because
-it is embedded into the Go binary. If frontend source changes, rebuild and
-commit the generated assets:
+The frontend bundle under `internal/controlplane/web/dist` is embedded into the
+Go binary but is not committed (only `dist/.gitkeep` is tracked, so a Go-only
+build still compiles and serves a "web UI not built" page). Build it before
+building a binary you intend to use:
 
 ```sh
 cd internal/controlplane/web
