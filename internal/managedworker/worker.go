@@ -26,6 +26,7 @@ type Worker struct {
 	stderr         io.Writer
 	heartbeatTicks <-chan time.Time
 	executeRun     func(context.Context, protocol.RunSpec) protocol.Completion
+	auth           *authAgent
 }
 
 const heartbeatInterval = 10 * time.Second
@@ -45,16 +46,34 @@ func New(workerConfig config.Worker, stdout, stderr io.Writer) (*Worker, error) 
 	if err != nil {
 		return nil, err
 	}
+	auth, err := newAuthAgent(workerConfig, client, instanceID, stderr)
+	if err != nil {
+		return nil, err
+	}
 	return &Worker{
 		config:     workerConfig,
 		instanceID: instanceID,
 		client:     client,
 		stdout:     stdout,
 		stderr:     stderr,
+		auth:       auth,
 	}, nil
 }
 
 func (w *Worker) Run(ctx context.Context) error {
+	if w.auth != nil {
+		// The auth broker runs beside the run loop so logins and status
+		// checks keep working while a long run executes.
+		authDone := make(chan struct{})
+		defer func() { <-authDone }()
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			defer close(authDone)
+			w.auth.run(ctx)
+		}()
+	}
 	for {
 		run, err := w.poll(ctx)
 		if err != nil {
