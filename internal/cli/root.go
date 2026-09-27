@@ -254,6 +254,7 @@ func newStartCommand(options *commandOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			server.TrustOrigins(serverConfig.TrustedOrigins)
 			return server.Serve(command.Context(), serverConfig.Listen, func(address net.Addr) {
 				fmt.Fprintf(options.stderr, "machinist: control plane listening on http://%s\n", address)
 			})

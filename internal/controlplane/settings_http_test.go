@@ -286,3 +286,25 @@ func TestSettingsSkipOverridesWorkersNoLongerServe(t *testing.T) {
 		t.Fatalf("skipped overrides must be reported: %d %v", code, body["problems"])
 	}
 }
+
+func TestTrustedOriginsAllowAProxiedUI(t *testing.T) {
+	server, client := newSettingsClient(t)
+	registerSettingsWorker(t, server)
+	value := map[string]any{"base_version": 0, "value": map[string]string{"timeout": "2m"}}
+	proxied := map[string]string{"Origin": "https://machinist.lab.example", "X-Machinist-CSRF": client.headers["X-Machinist-CSRF"]}
+	if code, _ := client.do(http.MethodPut, "/api/v1/settings/commands/plan", value, proxied); code != http.StatusForbidden {
+		t.Fatalf("untrusted https origin = %d, want 403", code)
+	}
+	server.TrustOrigins([]string{"https://machinist.lab.example"})
+	if code, body := client.do(http.MethodPut, "/api/v1/settings/commands/plan", value, proxied); code != http.StatusOK {
+		t.Fatalf("trusted origin = %d %v", code, body)
+	}
+	noCSRF := map[string]string{"Origin": "https://machinist.lab.example"}
+	if code, _ := client.do(http.MethodPut, "/api/v1/settings/commands/plan", value, noCSRF); code != http.StatusForbidden {
+		t.Fatalf("trusted origin without CSRF = %d, want 403", code)
+	}
+	evil := map[string]string{"Origin": "https://machinist.lab.example.evil.com", "X-Machinist-CSRF": client.headers["X-Machinist-CSRF"]}
+	if code, _ := client.do(http.MethodPut, "/api/v1/settings/commands/plan", value, evil); code != http.StatusForbidden {
+		t.Fatalf("look-alike origin = %d, want 403", code)
+	}
+}

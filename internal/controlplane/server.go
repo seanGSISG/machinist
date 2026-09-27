@@ -46,6 +46,7 @@ type Server struct {
 	maxConcurrentJobs int
 	workerToken       string
 	csrfToken         string
+	trustedOrigins    map[string]bool
 	logins            *loginBroker
 	handler           http.Handler
 }
@@ -631,11 +632,28 @@ func (s *Server) validBrowserRequest(request *http.Request) bool {
 		return false
 	}
 	origin, err := url.Parse(request.Header.Get("Origin"))
-	if err != nil || origin.Scheme != "http" || !strings.EqualFold(origin.Host, request.Host) {
+	if err != nil {
+		return false
+	}
+	// A configured origin is enough on its own: browsers set Origin and other sites cannot forge it,
+	// and a proxy may rewrite Host on the way to the loopback listener.
+	if s.trustedOrigins[strings.ToLower(origin.Scheme+"://"+origin.Host)] && origin.Host != "" {
+		return true
+	}
+	if origin.Scheme != "http" || !strings.EqualFold(origin.Host, request.Host) {
 		return false
 	}
 	hostname := origin.Hostname()
 	return hostname == "localhost" || net.ParseIP(hostname) != nil && net.ParseIP(hostname).IsLoopback()
+}
+
+// TrustOrigins allows browser requests from these normalized origins (config.NormalizeOrigin), for a
+// reverse proxy in front of the loopback listener that authenticates users itself.
+func (s *Server) TrustOrigins(origins []string) {
+	s.trustedOrigins = make(map[string]bool, len(origins))
+	for _, origin := range origins {
+		s.trustedOrigins[origin] = true
+	}
 }
 
 func validateLoopbackListen(listen string) error {
