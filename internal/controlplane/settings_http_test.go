@@ -263,3 +263,26 @@ func TestSettingsTablesKeepSchemaVersionForRollback(t *testing.T) {
 		t.Fatalf("settings must stay additive so older releases can open the database; user_version = %d", version)
 	}
 }
+
+func TestSettingsSkipOverridesWorkersNoLongerServe(t *testing.T) {
+	server, client := newSettingsClient(t)
+	registerSettingsWorker(t, server)
+	client.mustPut("commands", "plan", 0, map[string]string{"executor": "codex", "model": "sol"})
+	client.mustPut("executors", "codex", 0, map[string]string{"default_model": "sol"})
+
+	// The worker drops model "sol": the stored overrides can no longer be claimed.
+	request := protocol.PollRequest{InstanceID: "worker-a", Name: "colo", Executors: []string{"test", "codex", "script"}, Repositories: []string{"machinist"},
+		Models: map[string][]string{"codex": {"luna"}, "test": {}}}
+	if _, err := server.store.Poll(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	job := client.submit(map[string]string{"command": "plan", "repository": "machinist", "prompt": "later"})
+	if executor, model, _, _ := runSnapshot(t, server, job); executor != "test" || model != "" {
+		t.Fatalf("unservable override must be skipped, got %q %q", executor, model)
+	}
+	code, body := client.do(http.MethodGet, "/api/v1/settings", nil, nil)
+	problems := fmt.Sprint(body["problems"])
+	if code != http.StatusOK || !strings.Contains(problems, "plan") || !strings.Contains(problems, "codex") {
+		t.Fatalf("skipped overrides must be reported: %d %v", code, body["problems"])
+	}
+}

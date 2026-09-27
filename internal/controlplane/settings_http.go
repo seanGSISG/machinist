@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -78,8 +79,38 @@ func (s *Server) loadDefinitions(ctx context.Context) (config.Config, []config.S
 	if len(state.Versions) == 0 {
 		return file, []config.SettingsProblem{}, nil
 	}
-	merged, problems := file.WithSettings(state.Settings)
+	capabilities, err := s.store.ExecutorCapabilities(ctx)
+	if err != nil {
+		return config.Config{}, nil, err
+	}
+	merged, problems := applySettings(file, state.Settings, capabilities)
 	return merged, problems, nil
+}
+
+// applySettings merges stored settings over config.toml, first skipping command and
+// executor overrides that no registered worker can serve any more (for example after
+// a worker dropped an executor or model), so queued runs are never left unclaimable.
+// With no registered workers there is nothing to check against and nothing is skipped.
+func applySettings(file config.Config, settings config.Settings, capabilities map[string]ExecutorCapability) (config.Config, []config.SettingsProblem) {
+	skipped := []config.SettingsProblem{}
+	if len(capabilities) > 0 {
+		kept := config.Settings{Commands: maps.Clone(settings.Commands), Workflows: settings.Workflows, Executors: maps.Clone(settings.Executors)}
+		for _, name := range slices.Sorted(maps.Keys(settings.Commands)) {
+			if err := checkWorkerAuthority(file, settings, config.SettingsCommands, name, capabilities); err != nil {
+				delete(kept.Commands, name)
+				skipped = append(skipped, config.SettingsProblem{Kind: config.SettingsCommands, Name: name, Error: err.Error()})
+			}
+		}
+		for _, name := range slices.Sorted(maps.Keys(settings.Executors)) {
+			if err := checkWorkerAuthority(file, settings, config.SettingsExecutors, name, capabilities); err != nil {
+				delete(kept.Executors, name)
+				skipped = append(skipped, config.SettingsProblem{Kind: config.SettingsExecutors, Name: name, Error: err.Error()})
+			}
+		}
+		settings = kept
+	}
+	merged, problems := file.WithSettings(settings)
+	return merged, append(skipped, problems...)
 }
 
 func (s *Server) settings(response http.ResponseWriter, request *http.Request) {
@@ -100,7 +131,7 @@ func (s *Server) settings(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
-	merged, problems := file.WithSettings(state.Settings)
+	merged, problems := applySettings(file, state.Settings, capabilities)
 	result := settingsResponse{Commands: []commandSettingsView{}, Workflows: []workflowSettingsView{}, Executors: []executorSettingsView{}, Problems: problems}
 	executorNames := map[string]bool{}
 	for name := range capabilities {
