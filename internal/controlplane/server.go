@@ -107,6 +107,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		return nil, err
 	}
 	definition := report.Config
+	dropTriggersForInvalidCommands(&definition, report.InvalidCommands)
 	managedTriggers, e := definition.ResolveTriggers()
 	if e != nil {
 		return nil, e
@@ -131,7 +132,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	}
 	server := &Server{
 		store: store, definitionPath: definitionPath, lastGoodConfig: definition,
-		invalidCommands: append([]config.InvalidCommand(nil), report.InvalidCommands...), triggers: managedTriggers,
+		invalidCommands: append([]config.InvalidCommand{}, report.InvalidCommands...), triggers: managedTriggers,
 		github: NewGitHubCLI("gh", 30*time.Second), now: time.Now,
 		schedulerEvery: 30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
@@ -155,19 +156,44 @@ func (s *Server) loadDefinitionFile() (config.Config, []config.InvalidCommand, e
 	report, err := config.ValidateFile(s.definitionPath)
 	if err != nil {
 		if s.lastGoodConfig.Path() != "" {
-			return s.lastGoodConfig, append([]config.InvalidCommand(nil), s.invalidCommands...), nil
+			log.Printf("reload control plane configuration: %v; keeping last good configuration", err)
+			return s.lastGoodConfig, append([]config.InvalidCommand{}, s.invalidCommands...), nil
 		}
-		return config.Config{}, nil, err
+		return config.Config{}, []config.InvalidCommand{}, err
 	}
 	s.lastGoodConfig = report.Config
-	s.invalidCommands = append([]config.InvalidCommand(nil), report.InvalidCommands...)
-	return s.lastGoodConfig, append([]config.InvalidCommand(nil), s.invalidCommands...), nil
+	s.invalidCommands = append([]config.InvalidCommand{}, report.InvalidCommands...)
+	return s.lastGoodConfig, append([]config.InvalidCommand{}, s.invalidCommands...), nil
 }
 
 func (s *Server) currentInvalidCommands() []config.InvalidCommand {
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
-	return append([]config.InvalidCommand(nil), s.invalidCommands...)
+	return append([]config.InvalidCommand{}, s.invalidCommands...)
+}
+
+func dropTriggersForInvalidCommands(definition *config.Config, invalid []config.InvalidCommand) {
+	invalidNames := make(map[string]bool, len(invalid))
+	for _, entry := range invalid {
+		if _, loaded := definition.Commands[entry.Name]; !loaded {
+			invalidNames[entry.Name] = true
+		}
+	}
+	for name, trigger := range definition.Triggers.GitHub {
+		if invalidNames[trigger.Command] {
+			delete(definition.Triggers.GitHub, name)
+		}
+	}
+	for name, trigger := range definition.Triggers.Interval {
+		if invalidNames[trigger.Command] {
+			delete(definition.Triggers.Interval, name)
+		}
+	}
+	for name, trigger := range definition.Triggers.Cron {
+		if invalidNames[trigger.Command] {
+			delete(definition.Triggers.Cron, name)
+		}
+	}
 }
 
 func (s *Server) Serve(ctx context.Context, listen string, onListening func(net.Addr)) error {

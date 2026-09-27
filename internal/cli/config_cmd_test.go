@@ -25,17 +25,19 @@ func TestConfigValidateCmd(t *testing.T) {
 	}
 
 	for _, test := range []struct {
-		name      string
-		path      string
-		json      bool
-		wantCode  int
-		wantValid bool
+		name        string
+		path        string
+		json        bool
+		wantCode    int
+		wantValid   bool
+		wantInvalid string
+		wantError   bool
 	}{
 		{name: "valid human", path: validPath, wantCode: 0, wantValid: true},
 		{name: "invalid human", path: invalidPath, wantCode: 1},
 		{name: "valid JSON", path: validPath, json: true, wantCode: 0, wantValid: true},
-		{name: "invalid JSON", path: invalidPath, json: true, wantCode: 1},
-		{name: "syntax JSON", path: syntaxPath, json: true, wantCode: 1},
+		{name: "invalid JSON", path: invalidPath, json: true, wantCode: 1, wantInvalid: "bad"},
+		{name: "syntax JSON", path: syntaxPath, json: true, wantCode: 1, wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			args := []string{"config", "validate", "--config", test.path}
@@ -70,6 +72,16 @@ func TestConfigValidateCmd(t *testing.T) {
 			}
 			if result.Valid != test.wantValid || result.InvalidCommands == nil {
 				t.Fatalf("result = %#v", result)
+			}
+			if (result.Error != nil) != test.wantError {
+				t.Fatalf("error = %#v, want present %t", result.Error, test.wantError)
+			}
+			if test.wantInvalid == "" {
+				if len(result.InvalidCommands) != 0 {
+					t.Fatalf("invalid_commands = %#v, want empty", result.InvalidCommands)
+				}
+			} else if len(result.InvalidCommands) != 1 || result.InvalidCommands[0]["name"] != test.wantInvalid || result.InvalidCommands[0]["reason"] == "" {
+				t.Fatalf("invalid_commands = %#v", result.InvalidCommands)
 			}
 		})
 	}
