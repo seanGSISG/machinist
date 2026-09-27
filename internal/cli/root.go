@@ -42,6 +42,10 @@ func Execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	if err == nil {
 		return 0
 	}
+	var validation *configValidationError
+	if errors.As(err, &validation) {
+		return 1
+	}
 	var outcome *runner.OutcomeError
 	if errors.As(err, &outcome) {
 		fmt.Fprintf(stderr, "machinist: %s\n", outcome.Error())
@@ -69,6 +73,7 @@ func newRootCommand(options *commandOptions) *cobra.Command {
 	root.AddCommand(newSubmitCommand(options))
 	root.AddCommand(newStartCommand(options))
 	root.AddCommand(newUpdateCommand(options))
+	root.AddCommand(newConfigCommand(options))
 
 	worker := &cobra.Command{Use: "worker", Short: "Run or connect a Machinist Worker"}
 	worker.AddCommand(newRunCommand(options))

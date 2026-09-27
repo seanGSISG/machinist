@@ -203,10 +203,11 @@ func LoadConfig(path string) (Config, error) {
 		}
 		path = defaultPath
 	}
-	machinistConfig, err := loadConfigFile(path)
+	report, err := ValidateFile(path)
 	if err != nil {
 		return Config{}, err
 	}
+	machinistConfig := report.Config
 	machinistConfig.Server.configDir = filepath.Dir(machinistConfig.path)
 	machinistConfig.Server, err = applyServerDefaults(machinistConfig.Server)
 	if err != nil {
@@ -216,42 +217,14 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func loadConfigFile(path string) (Config, error) {
-	absPath, err := filepath.Abs(path)
+	report, err := ValidateFile(path)
 	if err != nil {
-		return Config{}, fmt.Errorf("resolve Machinist config: %w", err)
+		return Config{}, err
 	}
-	body, err := readBoundedFile(absPath, maxConfigBytes)
-	if err != nil {
-		return Config{}, fmt.Errorf("read Machinist config %q: %w", absPath, err)
+	if len(report.InvalidCommands) > 0 {
+		return Config{}, errors.New(report.InvalidCommands[0].Reason)
 	}
-	var raw map[string]any
-	if err := toml.Unmarshal(body, &raw); err != nil {
-		return Config{}, fmt.Errorf("parse Machinist config %q: %w", absPath, err)
-	}
-	if _, ok := raw["pipelines"]; ok {
-		return Config{}, fmt.Errorf("parse Machinist config %q: pipelines were removed; replace each pipeline with a repository-owned orchestration script configured under [commands]", absPath)
-	}
-	if _, ok := raw["shepherd"]; ok {
-		return Config{}, fmt.Errorf("parse Machinist config %q: shepherd schedules were removed; schedule a command with a [triggers.cron.NAME] or [triggers.interval.NAME] trigger", absPath)
-	}
-	if _, ok := raw["agents"]; ok {
-		return Config{}, fmt.Errorf("parse Machinist config %q: agents were renamed to commands; move [agents.NAME] definitions to [commands.NAME] and use --command", absPath)
-	}
-	if err := validateTriggerKeys(raw); err != nil {
-		return Config{}, fmt.Errorf("parse Machinist config %q: %w", absPath, err)
-	}
-	machinistConfig := Config{path: absPath}
-	decoder := toml.NewDecoder(strings.NewReader(string(body)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&machinistConfig); err != nil {
-		return Config{}, fmt.Errorf("parse Machinist config %q: %w", absPath, err)
-	}
-	for _, name := range machinistConfig.WorkflowNames() {
-		if _, err := machinistConfig.ResolveTaskWorkflow(name, ""); err != nil {
-			return Config{}, err
-		}
-	}
-	return machinistConfig, nil
+	return report.Config, nil
 }
 
 func (c Config) Path() string { return c.path }
@@ -370,11 +343,18 @@ func LoadCommand(definitionPath, name string) (ResolvedCommand, error) {
 	if strings.TrimSpace(name) == "" {
 		return ResolvedCommand{}, errors.New("command name is required")
 	}
-	definition, err := loadConfigFile(definitionPath)
+	report, err := ValidateFile(definitionPath)
 	if err != nil {
 		return ResolvedCommand{}, err
 	}
-	return definition.ResolveCommand(name)
+	if _, ok := report.Config.Commands[name]; !ok {
+		for _, invalid := range report.InvalidCommands {
+			if invalid.Name == name {
+				return ResolvedCommand{}, errors.New(invalid.Reason)
+			}
+		}
+	}
+	return report.Config.ResolveCommand(name)
 }
 
 // ResolveCommand resolves one named command from an already loaded definition.

@@ -68,7 +68,7 @@ type settingChangeResponse struct {
 
 // loadDefinitions returns config.toml with the stored settings applied.
 func (s *Server) loadDefinitions(ctx context.Context) (config.Config, []config.SettingsProblem, error) {
-	file, err := config.LoadDefinitions(s.definitionPath)
+	file, _, err := s.loadDefinitionFile()
 	if err != nil {
 		return config.Config{}, nil, err
 	}

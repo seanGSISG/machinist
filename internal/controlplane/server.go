@@ -39,6 +39,9 @@ var webAssets embed.FS
 type Server struct {
 	store             *Store
 	definitionPath    string
+	configMu          sync.Mutex
+	lastGoodConfig    config.Config
+	invalidCommands   []config.InvalidCommand
 	triggers          []config.ResolvedTrigger
 	github            githubTriggerClient
 	schedulerEvery    time.Duration
@@ -56,10 +59,11 @@ type Server struct {
 type statusResponse struct {
 	Workflows []string `json:"workflows"`
 	Snapshot
-	Commands     []string             `json:"commands"`
-	Repositories []string             `json:"repositories"`
-	Connections  []ExecutorAuthStatus `json:"connections"`
-	CSRFToken    string               `json:"csrf_token"`
+	Commands        []string                `json:"commands"`
+	InvalidCommands []config.InvalidCommand `json:"invalid_commands"`
+	Repositories    []string                `json:"repositories"`
+	Connections     []ExecutorAuthStatus    `json:"connections"`
+	CSRFToken       string                  `json:"csrf_token"`
 }
 
 type submitRequest struct {
@@ -108,11 +112,12 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if err != nil {
 		return nil, err
 	}
-	managedTriggers, err := config.LoadTriggers(definitionPath)
+	report, err := config.ValidateFile(definitionPath)
 	if err != nil {
 		return nil, err
 	}
-	definition, e := config.LoadDefinitions(definitionPath)
+	definition := report.Config
+	managedTriggers, e := definition.ResolveTriggers()
 	if e != nil {
 		return nil, e
 	}
@@ -135,7 +140,8 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		return nil, fmt.Errorf("restore managed triggers: %w", err)
 	}
 	server := &Server{
-		store: store, definitionPath: definitionPath, triggers: managedTriggers,
+		store: store, definitionPath: definitionPath, lastGoodConfig: definition,
+		invalidCommands: append([]config.InvalidCommand(nil), report.InvalidCommands...), triggers: managedTriggers,
 		github: NewGitHubCLI("gh", 30*time.Second), now: time.Now,
 		schedulerEvery: 30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
@@ -150,6 +156,29 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }
+
+// loadDefinitionFile applies syntactically valid reloads and retains the last
+// good file when a write is incomplete or otherwise not valid TOML.
+func (s *Server) loadDefinitionFile() (config.Config, []config.InvalidCommand, error) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	report, err := config.ValidateFile(s.definitionPath)
+	if err != nil {
+		if s.lastGoodConfig.Path() != "" {
+			return s.lastGoodConfig, append([]config.InvalidCommand(nil), s.invalidCommands...), nil
+		}
+		return config.Config{}, nil, err
+	}
+	s.lastGoodConfig = report.Config
+	s.invalidCommands = append([]config.InvalidCommand(nil), report.InvalidCommands...)
+	return s.lastGoodConfig, append([]config.InvalidCommand(nil), s.invalidCommands...), nil
+}
+
+func (s *Server) currentInvalidCommands() []config.InvalidCommand {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	return append([]config.InvalidCommand(nil), s.invalidCommands...)
+}
 
 func (s *Server) Serve(ctx context.Context, listen string, onListening func(net.Addr)) error {
 	if err := validateLoopbackListen(listen); err != nil {
@@ -373,12 +402,13 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(response, http.StatusOK, statusResponse{
-		Snapshot:     snapshot,
-		Connections:  connections,
-		Commands:     definition.CommandNames(),
-		Workflows:    definition.WorkflowNames(),
-		Repositories: repositories,
-		CSRFToken:    s.csrfToken,
+		Snapshot:        snapshot,
+		Connections:     connections,
+		Commands:        definition.CommandNames(),
+		InvalidCommands: s.currentInvalidCommands(),
+		Workflows:       definition.WorkflowNames(),
+		Repositories:    repositories,
+		CSRFToken:       s.csrfToken,
 	})
 }
 
