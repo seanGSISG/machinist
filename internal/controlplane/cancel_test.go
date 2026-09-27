@@ -52,11 +52,25 @@ func TestCancelWorkflowJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := server.store.db.Exec(`UPDATE jobs SET state='failed' WHERE id=?`, finished); err != nil {
+	if _, err := server.store.db.Exec(`UPDATE jobs SET state='succeeded' WHERE id=?`, finished); err != nil {
 		t.Fatal(err)
 	}
-	assertCancelResponse(t, web.URL, finished, http.StatusConflict, "failed")
+	assertCancelResponse(t, web.URL, finished, http.StatusConflict, "succeeded")
 	assertEventCount(t, server.store, finished, 0)
+
+	for _, state := range []string{"interrupted", "blocked", "failed"} {
+		t.Run(state, func(t *testing.T) {
+			id, err := server.store.createWorkflowJob(t.Context(), state, "machinist", "workflow", []config.WorkflowStep{step}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := server.store.db.Exec(`UPDATE jobs SET state=? WHERE id=?`, state, id); err != nil {
+				t.Fatal(err)
+			}
+			assertCancelResponse(t, web.URL, id, http.StatusAccepted, "cancelled")
+			assertEventCount(t, server.store, id, 1)
+		})
+	}
 }
 
 func TestCancelUnknownJob(t *testing.T) {
