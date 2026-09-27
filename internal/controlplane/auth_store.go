@@ -63,10 +63,7 @@ func (s *Store) RecordExecutorAuth(ctx context.Context, request protocol.AuthSyn
 		if !validAuthState(state) {
 			state = protocol.AuthUnknown
 		}
-		detail := report.Detail
-		if len(detail) > maxAuthDetailBytes {
-			detail = detail[:maxAuthDetailBytes]
-		}
+		detail := truncateUTF8(report.Detail, maxAuthDetailBytes)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO worker_executor_auth(worker_instance,executor,login,login_timeout_ms,state,detail,checked_at,expires_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
 			request.InstanceID, executor, report.Login, max(report.LoginTimeout, 0), state, detail, optionalTime(report.CheckedAt), optionalTime(report.ExpiresAt), now); err != nil {
 			return fmt.Errorf("store executor auth: %w", err)
@@ -76,10 +73,11 @@ func (s *Store) RecordExecutorAuth(ctx context.Context, request protocol.AuthSyn
 }
 
 // ExecutorAuthStatuses lists the latest auth state per worker name and
-// executor. Online is true when the worker reported within onlineAfter.
+// executor: with several instances of one name (a restart), the instance that
+// reported last wins. Online is true when the worker reported within onlineAfter.
 func (s *Store) ExecutorAuthStatuses(ctx context.Context, onlineAfter time.Time) ([]ExecutorAuthStatus, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT w.name,a.worker_instance,a.executor,a.login,a.login_timeout_ms,a.state,a.detail,COALESCE(a.checked_at,''),COALESCE(a.expires_at,''),a.updated_at
-FROM worker_executor_auth a JOIN workers w ON w.instance_id=a.worker_instance ORDER BY w.name,a.executor,a.updated_at DESC`)
+FROM worker_executor_auth a JOIN workers w ON w.instance_id=a.worker_instance ORDER BY w.name,a.executor,julianday(a.updated_at) DESC,a.worker_instance DESC`)
 	if err != nil {
 		return nil, err
 	}

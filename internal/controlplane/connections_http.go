@@ -85,7 +85,7 @@ func (s *Server) startLogin(response http.ResponseWriter, request *http.Request)
 		writeError(response, http.StatusConflict, fmt.Errorf("worker %q is offline", worker))
 		return
 	}
-	session, token, err := s.logins.start(worker, executor, target.LoginTimeout, input.Replace)
+	session, token, err := s.logins.start(worker, target.InstanceID, executor, target.LoginTimeout, input.Replace)
 	if errors.Is(err, ErrLoginActive) {
 		writeError(response, http.StatusConflict, err)
 		return
@@ -165,5 +165,5 @@ func (s *Server) authSync(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(response, http.StatusOK, protocol.AuthSyncResponse{Actions: s.logins.sync(input.Name, input.Sessions, input.Active)})
+	writeJSON(response, http.StatusOK, protocol.AuthSyncResponse{Actions: s.logins.sync(input.InstanceID, input.Sessions, input.Active)})
 }

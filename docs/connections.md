@@ -137,9 +137,15 @@ still works for them.
   forgotten after 10 minutes, and a restart ends them all.
 - The worker never runs an argument from the control plane. A start for an
   executor without a `login` recipe fails on the worker.
+- A session is bound to one worker instance, the one that reported last for
+  that worker name. During a restart, when an old and a new instance share a
+  name, only that instance receives the session's actions or can report on it.
 - Terminal output stays on the worker. What it reports is redacted: links,
-  anything typed into the terminal, and token-like strings (32+ characters)
-  are replaced, and only the last 4 KiB is kept. Status output is parsed and
+  text pasted from the box (3 characters or more), and token-like strings
+  (32+ characters) are replaced, and only the last 4 KiB is kept. Shorter
+  input, such as a picker choice like `1` or `y`, stays visible: redacting it
+  would blank every matching character in the transcript, and no code or
+  password is that short. Key buttons and `start_input` are not redacted. Status output is parsed and
   discarded; only the state and a short detail are reported.
 - Worker logs record only `login <id> for <executor>: started|succeeded|...`.
 

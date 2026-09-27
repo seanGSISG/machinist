@@ -149,10 +149,51 @@ func TestConnectionsRejectOfflineWorkersAndReplaceStuckSessions(t *testing.T) {
 	}
 }
 
+// During a restart two instances can share a worker name. A login goes to
+// the instance that reported last, and the other one cannot take it over.
+func TestLoginIsBoundToOneWorkerInstance(t *testing.T) {
+	server, client := newSettingsClient(t)
+	authSync(t, client, claudeReport(protocol.AuthExpired))
+	later := time.Now().Add(time.Second)
+	server.store.now = func() time.Time { return later }
+	newer := claudeReport(protocol.AuthExpired)
+	newer.InstanceID = "worker-a2"
+	authSync(t, client, newer)
+	code, body := client.do(http.MethodPost, "/api/v1/connections/colo/claude/login", map[string]any{}, client.headers)
+	if code != http.StatusCreated {
+		t.Fatalf("login = %d %v", code, body)
+	}
+	id := body["session"].(map[string]any)["id"].(string)
+	token := body["token"].(string)
+
+	old := claudeReport(protocol.AuthExpired)
+	old.Active = []string{id}
+	old.Sessions = []protocol.LoginSessionReport{{ID: id, State: protocol.LoginSucceeded}}
+	if actions := authSync(t, client, old); len(actions) != 0 {
+		t.Fatalf("the older instance took the login: %+v", actions)
+	}
+	owner := map[string]string{"Origin": client.headers["Origin"], "X-Machinist-CSRF": client.headers["X-Machinist-CSRF"], loginTokenHeader: token}
+	if code, body := client.do(http.MethodGet, "/api/v1/connections/sessions/"+id, nil, owner); code != http.StatusOK || body["state"] != protocol.LoginPending {
+		t.Fatalf("the older instance changed the session: %d %v", code, body)
+	}
+	if actions := authSync(t, client, newer); len(actions) != 1 || actions[0].SessionID != id || actions[0].Kind != protocol.LoginActionStart {
+		t.Fatalf("the newer instance did not get the login: %+v", actions)
+	}
+}
+
+func TestTruncateUTF8KeepsWholeRunes(t *testing.T) {
+	if got := truncateUTF8("abé", 3); got != "ab" {
+		t.Fatalf("truncateUTF8 = %q", got)
+	}
+	if got := truncateUTF8("abc", 3); got != "abc" {
+		t.Fatalf("truncateUTF8 = %q", got)
+	}
+}
+
 func TestLoginBrokerExpiresAndSanitizesSessions(t *testing.T) {
 	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 	broker := newLoginBroker(func() time.Time { return now })
-	view, token, err := broker.start("colo", "claude", time.Minute, false)
+	view, token, err := broker.start("colo", "worker-a", "claude", time.Minute, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,9 +202,9 @@ func TestLoginBrokerExpiresAndSanitizesSessions(t *testing.T) {
 		t.Fatalf("unclaimed session = %+v", view)
 	}
 
-	view, token, _ = broker.start("colo", "claude", time.Minute, false)
-	broker.sync("colo", nil, nil)
-	broker.sync("colo", []protocol.LoginSessionReport{{ID: view.ID, State: protocol.LoginRunning, URL: "javascript:alert(1)", Code: strings.Repeat("x", 100)}}, []string{view.ID})
+	view, token, _ = broker.start("colo", "worker-a", "claude", time.Minute, false)
+	broker.sync("worker-a", nil, nil)
+	broker.sync("worker-a", []protocol.LoginSessionReport{{ID: view.ID, State: protocol.LoginRunning, URL: "javascript:alert(1)", Code: strings.Repeat("x", 100)}}, []string{view.ID})
 	if view, _ = broker.get(view.ID, token); view.URL != "" || view.Code != "" || view.State != protocol.LoginRunning {
 		t.Fatalf("unsafe report was kept: %+v", view)
 	}
@@ -172,15 +213,15 @@ func TestLoginBrokerExpiresAndSanitizesSessions(t *testing.T) {
 		t.Fatalf("silent worker session = %+v", view)
 	}
 
-	view, token, _ = broker.start("colo", "claude", time.Minute, false)
-	broker.sync("colo", nil, nil)
+	view, token, _ = broker.start("colo", "worker-a", "claude", time.Minute, false)
+	broker.sync("worker-a", nil, nil)
 	if err := broker.input(view.ID, token, "", "enter"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := broker.cancel(view.ID, token); err != nil {
 		t.Fatal(err)
 	}
-	actions := broker.sync("colo", nil, nil)
+	actions := broker.sync("worker-a", nil, nil)
 	if len(actions) != 1 || actions[0].Kind != protocol.LoginActionCancel {
 		t.Fatalf("cancel should drop queued input and send cancel: %+v", actions)
 	}

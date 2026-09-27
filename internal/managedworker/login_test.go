@@ -3,10 +3,12 @@ package managedworker
 import (
 	"context"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -199,5 +201,27 @@ func TestRedactTranscriptKeepsOnlyARedactedTail(t *testing.T) {
 	head := redactTranscript("token sk-ant-"+strings.Repeat("a", 40)+"\nvisit https://example.test/x\ntyped hunter22\n", []string{"hunter22"})
 	if head != "token [redacted]\nvisit [login link]\ntyped [redacted]" {
 		t.Fatalf("redacted = %q", head)
+	}
+}
+
+// A finished session's process id may be reused, so stop must not signal it.
+func TestStopAfterTheLoginEndedSignalsNothing(t *testing.T) {
+	bystander := exec.Command("sleep", "30")
+	bystander.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := bystander.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() { _ = bystander.Wait(); close(exited) }()
+	defer func() { _ = syscall.Kill(-bystander.Process.Pid, syscall.SIGKILL); <-exited }()
+	session := &loginSession{id: "login_0123456789abcdef", state: protocol.LoginSucceeded, process: bystander.Process, done: make(chan struct{})}
+	session.stop(protocol.LoginCancelled)
+	select {
+	case <-exited:
+		t.Fatal("stop signalled the process group of a finished login")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if session.state != protocol.LoginSucceeded || session.reason != "" {
+		t.Fatalf("finished session changed: %q %q", session.state, session.reason)
 	}
 }

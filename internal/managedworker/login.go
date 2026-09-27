@@ -252,7 +252,12 @@ func (s *loginSession) write(text string, secret bool) error {
 
 func (s *loginSession) stop(reason string) {
 	s.mu.Lock()
-	if s.reason == "" && s.state == protocol.LoginRunning {
+	if s.state != protocol.LoginRunning {
+		// Already reaped: its process group id may belong to another process now.
+		s.mu.Unlock()
+		return
+	}
+	if s.reason == "" {
 		s.reason = reason
 	}
 	process := s.process

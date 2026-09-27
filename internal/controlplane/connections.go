@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/owainlewis/machinist/internal/protocol"
 )
@@ -37,12 +38,16 @@ type loginBroker struct {
 	mu       sync.Mutex
 	now      func() time.Time
 	sessions map[string]*loginSession
-	pending  map[string][]protocol.LoginAction
+	// pending holds queued actions by worker instance, not name: during a
+	// restart two instances can share a name, and only the instance the
+	// session was started on may pick its actions up.
+	pending map[string][]protocol.LoginAction
 }
 
 type loginSession struct {
 	id         string
 	worker     string
+	instance   string
 	executor   string
 	tokenHash  [32]byte
 	state      string
@@ -88,9 +93,10 @@ func loginEnded(state string) bool {
 	return state != protocol.LoginPending && state != protocol.LoginRunning && state != protocol.LoginAwaiting
 }
 
-// start creates a single-use session and returns its bearer token. With
-// replace, an active session for the same executor is cancelled first.
-func (b *loginBroker) start(worker, executor string, timeout time.Duration, replace bool) (LoginSessionView, string, error) {
+// start creates a single-use session on one worker instance and returns its
+// bearer token. With replace, an active session for the same worker name and
+// executor is cancelled first.
+func (b *loginBroker) start(worker, instance, executor string, timeout time.Duration, replace bool) (LoginSessionView, string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.expireLocked()
@@ -114,9 +120,9 @@ func (b *loginBroker) start(worker, executor string, timeout time.Duration, repl
 		timeout = defaultLoginTimeout
 	}
 	now := b.now().UTC()
-	session := &loginSession{id: id, worker: worker, executor: executor, tokenHash: sha256.Sum256([]byte(token)), state: protocol.LoginPending, createdAt: now, deadline: now.Add(timeout + loginDeadlineGrace)}
+	session := &loginSession{id: id, worker: worker, instance: instance, executor: executor, tokenHash: sha256.Sum256([]byte(token)), state: protocol.LoginPending, createdAt: now, deadline: now.Add(timeout + loginDeadlineGrace)}
 	b.sessions[id] = session
-	b.pending[worker] = append(b.pending[worker], protocol.LoginAction{SessionID: id, Kind: protocol.LoginActionStart, Executor: executor})
+	b.pending[instance] = append(b.pending[instance], protocol.LoginAction{SessionID: id, Kind: protocol.LoginActionStart, Executor: executor})
 	return session.view(), token, nil
 }
 
@@ -168,7 +174,7 @@ func (b *loginBroker) input(id, token, text, key string) error {
 	if session.state == protocol.LoginAwaiting {
 		session.state = protocol.LoginRunning
 	}
-	b.pending[session.worker] = append(b.pending[session.worker], protocol.LoginAction{SessionID: id, Kind: protocol.LoginActionInput, Text: text, Key: key})
+	b.pending[session.instance] = append(b.pending[session.instance], protocol.LoginAction{SessionID: id, Kind: protocol.LoginActionInput, Text: text, Key: key})
 	return nil
 }
 
@@ -191,7 +197,7 @@ func (b *loginBroker) cancelLocked(session *loginSession) {
 	started := session.state != protocol.LoginPending
 	b.endLocked(session, protocol.LoginCancelled, "")
 	if started {
-		b.pending[session.worker] = append(b.pending[session.worker], protocol.LoginAction{SessionID: session.id, Kind: protocol.LoginActionCancel, Executor: session.executor})
+		b.pending[session.instance] = append(b.pending[session.instance], protocol.LoginAction{SessionID: session.id, Kind: protocol.LoginActionCancel, Executor: session.executor})
 	}
 }
 
@@ -202,24 +208,40 @@ func (b *loginBroker) endLocked(session *loginSession, state, message string) {
 		session.err = message
 	}
 	session.endedAt = b.now().UTC()
-	actions := b.pending[session.worker][:0]
-	for _, action := range b.pending[session.worker] {
+	actions := b.pending[session.instance][:0]
+	for _, action := range b.pending[session.instance] {
 		if action.SessionID != session.id || action.Kind == protocol.LoginActionCancel {
 			actions = append(actions, action)
 		}
 	}
-	b.pending[session.worker] = actions
+	b.pending[session.instance] = actions
 }
 
-// sync applies a worker's session reports and hands it its queued actions.
-// A worker can only update sessions addressed to its own name.
-func (b *loginBroker) sync(worker string, reports []protocol.LoginSessionReport, active []string) []protocol.LoginAction {
+// dropActionsLocked forgets every queued action for a session, so an
+// instance that never syncs again does not keep them forever.
+func (b *loginBroker) dropActionsLocked(instance, id string) {
+	actions := b.pending[instance][:0]
+	for _, action := range b.pending[instance] {
+		if action.SessionID != id {
+			actions = append(actions, action)
+		}
+	}
+	if len(actions) == 0 {
+		delete(b.pending, instance)
+		return
+	}
+	b.pending[instance] = actions
+}
+
+// sync applies a worker instance's session reports and hands it its queued
+// actions. An instance can only update sessions started on it.
+func (b *loginBroker) sync(instance string, reports []protocol.LoginSessionReport, active []string) []protocol.LoginAction {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.now().UTC()
 	for _, report := range reports {
 		session := b.sessions[report.ID]
-		if session == nil || session.worker != worker || loginEnded(session.state) {
+		if session == nil || session.instance != instance || loginEnded(session.state) {
 			continue
 		}
 		session.lastReport = now
@@ -240,21 +262,17 @@ func (b *loginBroker) sync(worker string, reports []protocol.LoginSessionReport,
 			session.state = report.State
 			session.awaiting = report.AwaitingInput
 		case protocol.LoginSucceeded, protocol.LoginFailed, protocol.LoginCancelled, protocol.LoginTimedOut:
-			message := report.Error
-			if len(message) > maxAuthDetailBytes {
-				message = message[:maxAuthDetailBytes]
-			}
-			b.endLocked(session, report.State, message)
+			b.endLocked(session, report.State, truncateUTF8(report.Error, maxAuthDetailBytes))
 		}
 	}
 	for _, id := range active {
-		if session := b.sessions[id]; session != nil && session.worker == worker {
+		if session := b.sessions[id]; session != nil && session.instance == instance {
 			session.lastReport = now
 		}
 	}
 	b.expireLocked()
-	actions := b.pending[worker]
-	delete(b.pending, worker)
+	actions := b.pending[instance]
+	delete(b.pending, instance)
 	for _, action := range actions {
 		if action.Kind == protocol.LoginActionStart {
 			if session := b.sessions[action.SessionID]; session != nil {
@@ -274,12 +292,13 @@ func (b *loginBroker) expireLocked() {
 		case loginEnded(session.state):
 			if now.Sub(session.endedAt) > loginRetention {
 				delete(b.sessions, id)
+				b.dropActionsLocked(session.instance, id)
 			}
 		case session.state == protocol.LoginPending && now.Sub(session.createdAt) > loginPickupWindow:
 			b.endLocked(session, protocol.LoginFailed, "the worker did not start the login; is it online?")
 		case now.After(session.deadline):
 			b.endLocked(session, protocol.LoginTimedOut, "")
-			b.pending[session.worker] = append(b.pending[session.worker], protocol.LoginAction{SessionID: id, Kind: protocol.LoginActionCancel, Executor: session.executor})
+			b.pending[session.instance] = append(b.pending[session.instance], protocol.LoginAction{SessionID: id, Kind: protocol.LoginActionCancel, Executor: session.executor})
 		case session.state != protocol.LoginPending && now.Sub(session.lastReport) > loginWorkerSilence:
 			b.endLocked(session, protocol.LoginFailed, "the worker stopped responding")
 		}
@@ -312,4 +331,16 @@ func validLoginURL(raw string) bool {
 	}
 	parsed, err := url.Parse(raw)
 	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
+}
+
+// truncateUTF8 cuts value to at most limit bytes without splitting a rune.
+func truncateUTF8(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	value = value[:limit]
+	for len(value) > 0 && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
