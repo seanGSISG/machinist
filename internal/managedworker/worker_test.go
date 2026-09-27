@@ -107,25 +107,25 @@ func TestManagedWorkerExecutesControlPlaneRun(t *testing.T) {
 	}
 }
 
-func TestManagedWorkerExecutesQueuedShepherdCommand(t *testing.T) {
+func TestManagedWorkerExecutesQueuedCommandWithRenderedPrompt(t *testing.T) {
 	directory := t.TempDir()
 	repository := filepath.Join(directory, "repository")
 	if output, err := exec.Command("git", "init", "--quiet", repository).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
 	definitionPath := filepath.Join(directory, "config.toml")
-	if err := os.WriteFile(filepath.Join(directory, "shepherd.md"), []byte("Trusted schedule:\n{{machinist.prompt}}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, "audit.md"), []byte("Scheduled request:\n{{machinist.prompt}}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	definition := `[commands.shepherd]
+	definition := `[commands.audit]
 executor = "test"
-prompt_file = "shepherd.md"
+prompt_file = "audit.md"
 timeout = "5s"
 `
 	if err := os.WriteFile(definitionPath, []byte(definition), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	command, err := config.LoadCommand(definitionPath, "shepherd")
+	command, err := config.LoadCommand(definitionPath, "audit")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ timeout = "5s"
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if _, err := store.CreateJob(t.Context(), "queued shepherd", "disposable", "shepherd", command); err != nil {
+	if _, err := store.CreateJob(t.Context(), "queued audit", "disposable", "audit", command); err != nil {
 		t.Fatal(err)
 	}
 	server, err := controlplane.NewServer(store, definitionPath, "secret", 0)
@@ -152,7 +152,7 @@ timeout = "5s"
 		t.Fatal(err)
 	}
 	worker, err := New(config.Worker{
-		Name:          "shepherd-worker",
+		Name:          "audit-worker",
 		DataDirectory: filepath.Join(directory, "worker-data"),
 		ControlPlane:  config.ControlPlane{URL: httpServer.URL, TokenFile: tokenPath},
 		Executors:     map[string]config.Executor{"test": {Command: []string{"/bin/sh", "-c", `input=$(cat); case "$input" in *"at most 2 mutating actions"*) exit 0;; *) exit 7;; esac`}}},
@@ -172,7 +172,7 @@ timeout = "5s"
 			t.Fatal(err)
 		}
 		if len(snapshot.Jobs) == 1 && snapshot.Jobs[0].State == "succeeded" {
-			if snapshot.Jobs[0].Runs[0].Command != "shepherd" {
+			if snapshot.Jobs[0].Runs[0].Command != "audit" {
 				t.Fatalf("queued job = %#v", snapshot.Jobs[0])
 			}
 			break
@@ -216,6 +216,21 @@ func TestManagedWorkerRequiresHTTPSForRemoteControlPlane(t *testing.T) {
 	}, os.Stdout, os.Stderr)
 	if err == nil || !strings.Contains(err.Error(), "must use https") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestControlPlaneEndpointRejectsQueryAndFragment(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://control.example.com?tenant=machinist",
+		"https://control.example.com?",
+		"https://control.example.com#api",
+		"https://control.example.com#",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			if _, err := controlPlaneEndpoint(endpoint); err == nil {
+				t.Fatalf("controlPlaneEndpoint(%q) succeeded", endpoint)
+			}
+		})
 	}
 }
 
@@ -483,4 +498,30 @@ func TestManagedWorkerStopsHeartbeatLoopWhenTerminated(t *testing.T) {
 		t.Fatalf("completion = %#v", completion)
 	}
 	ticks <- time.Time{}
+}
+
+func TestWorkflowStopsProcessAfterLeaseRejection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusConflict) }))
+	defer server.Close()
+	ticks := make(chan time.Time, 1)
+	started := make(chan struct{})
+	worker := &Worker{client: newClient(server.URL, "secret", server.Client()), stderr: io.Discard, instanceID: "worker", heartbeatTicks: ticks,
+		executeRun: func(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
+			close(started)
+			<-ctx.Done()
+			return protocol.Completion{State: "cancelled", ExitCode: 130}
+		},
+	}
+	done := make(chan protocol.Completion, 1)
+	go func() { done <- worker.executeWithHeartbeats(t.Context(), protocol.RunSpec{ID: "run", Workflow: true}) }()
+	<-started
+	ticks <- time.Now()
+	select {
+	case result := <-done:
+		if result.State != "cancelled" {
+			t.Fatal(result)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("workflow kept executing after definitive lease rejection")
+	}
 }
