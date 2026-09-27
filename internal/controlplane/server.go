@@ -53,15 +53,6 @@ type Server struct {
 	handler           http.Handler
 }
 
-type statusResponse struct {
-	Workflows []string `json:"workflows"`
-	Snapshot
-	Commands     []string             `json:"commands"`
-	Repositories []string             `json:"repositories"`
-	Connections  []ExecutorAuthStatus `json:"connections"`
-	CSRFToken    string               `json:"csrf_token"`
-}
-
 type submitRequest struct {
 	Labels          map[string]string `json:"labels,omitempty"`
 	SupersedesJobID string            `json:"supersedes_job_id,omitempty"`
@@ -372,13 +363,21 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(response, http.StatusOK, statusResponse{
-		Snapshot:     snapshot,
-		Connections:  connections,
-		Commands:     definition.CommandNames(),
-		Workflows:    definition.WorkflowNames(),
-		Repositories: repositories,
-		CSRFToken:    s.csrfToken,
+	writeJSON(response, http.StatusOK, StatusResponse{
+		SchemaVersion:         statusSchemaVersion,
+		GeneratedAt:           now,
+		Jobs:                  cappedJobSummaries(snapshot.Jobs, definition.Server.FinishedJobLimit()),
+		Workers:               snapshot.Workers,
+		Triggers:              snapshot.Triggers,
+		Connections:           connections,
+		Commands:              definition.CommandNames(),
+		Workflows:             definition.WorkflowNames(),
+		Repositories:          repositories,
+		Executors:             []ExecutorStatus{},
+		GatesAwaitingApproval: []StatusItem{},
+		BlockedJobs:           []StatusItem{},
+		Logins:                []StatusItem{},
+		CSRFToken:             s.csrfToken,
 	})
 }
 

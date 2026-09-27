@@ -66,7 +66,7 @@ func TestServerProtectsSubmissionAndWorkerAPIs(t *testing.T) {
 	created.Body.Close()
 
 	status = getStatus(t, webServer.URL)
-	if len(status.Jobs) != 1 || status.Jobs[0].Prompt != "Work locally" || status.Jobs[0].Runs[0].State != "queued" || status.Jobs[0].Runs[0].Model != "luna" {
+	if len(status.Jobs) != 1 || status.Jobs[0].Runs[0].State != "queued" || status.Jobs[0].Runs[0].Model != "luna" {
 		t.Fatalf("jobs = %#v", status.Jobs)
 	}
 
@@ -213,7 +213,7 @@ func TestServerAcceptsBearerSubmissionAndRejectsInvalidToken(t *testing.T) {
 	invalid.Body.Close()
 
 	status := getStatus(t, webServer.URL)
-	if len(status.Jobs) != 1 || status.Jobs[0].Prompt != "queue from terminal" {
+	if len(status.Jobs) != 1 {
 		t.Fatalf("jobs after bearer submissions = %#v", status.Jobs)
 	}
 }
