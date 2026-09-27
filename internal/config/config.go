@@ -75,6 +75,8 @@ type Config struct {
 	GitHub    GitHub              `toml:"github"`
 	Triggers  TriggerDefinitions  `toml:"triggers"`
 	path      string
+	// executorModels holds per-executor default model aliases from settings.
+	executorModels map[string]string
 }
 
 type GitHub struct {
@@ -136,6 +138,9 @@ type Command struct {
 	Executor   string `toml:"executor"`
 	PromptFile string `toml:"prompt_file"`
 	Timeout    string `toml:"timeout"`
+	// prompt and model are set only by database settings, never by TOML.
+	prompt string
+	model  string
 }
 
 type ResolvedCommand struct {
@@ -366,7 +371,18 @@ func resolveCommand(definitionPath, name string, command Command) (ResolvedComma
 		return ResolvedCommand{}, fmt.Errorf("command %q must define executor", name)
 	}
 	prompt := promptParameter
-	if strings.TrimSpace(command.PromptFile) != "" {
+	if command.prompt != "" {
+		if len(command.prompt) > maxPromptBytes {
+			return ResolvedCommand{}, fmt.Errorf("command %q prompt exceeds %d bytes", name, maxPromptBytes)
+		}
+		if strings.TrimSpace(command.prompt) == "" {
+			return ResolvedCommand{}, fmt.Errorf("command %q prompt is empty", name)
+		}
+		if err := validatePromptParameters(name, command.prompt); err != nil {
+			return ResolvedCommand{}, err
+		}
+		prompt = command.prompt
+	} else if strings.TrimSpace(command.PromptFile) != "" {
 		promptPath, err := expandHome(command.PromptFile)
 		if err != nil {
 			return ResolvedCommand{}, fmt.Errorf("resolve command %q prompt: %w", name, err)

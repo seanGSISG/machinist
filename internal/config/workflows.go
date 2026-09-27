@@ -87,6 +87,9 @@ func (c Config) ResolveTaskWorkflow(name, model string) ([]WorkflowStep, error) 
 			return nil, err
 		}
 		command.Model = model
+		if command.Model == "" {
+			command.Model = c.DefaultModel(commandName)
+		}
 		if step.ID == "" {
 			step.ID = commandName
 		}
