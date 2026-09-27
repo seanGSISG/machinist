@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { PageHeading, QuietState } from "@/components/ui/page-heading";
 import { Tabs } from "@/components/ui/tabs";
-import { commandForm, commandOverride, describeVersion, moveStep, promptWarnings, settingsRequest, sourceLabel, workflowOverride, workflowSteps } from "@/settings";
+import { commandForm, commandOverride, describeVersion, executorSaveMode, moveStep, promptWarnings, rememberNotice, settingsRequest, sourceLabel, takeNotice, workflowOverride, workflowSteps } from "@/settings";
 
 const namePattern = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -36,15 +36,17 @@ export function SettingsPage({ csrfToken }) {
   </div>;
 }
 
-function useSave(csrfToken, reload) {
-  const [message, setMessage] = useState(null);
+function useSave(csrfToken, reload, noticeKey) {
+  const [message, setMessage] = useState(() => takeNotice(noticeKey));
   const [saving, setSaving] = useState(false);
   async function save(kind, name, baseVersion, value) {
     setSaving(true);
     setMessage(null);
     try {
       const result = await settingsRequest(`/api/v1/settings/${kind}/${encodeURIComponent(name)}`, { method: "PUT", body: { base_version: baseVersion, value }, csrfToken });
-      setMessage({ tone: "success", text: `Saved version ${result.version.id}. New tasks use it.`, warnings: result.warnings || [] });
+      const notice = { tone: "success", text: `Saved version ${result.version.id}. New tasks use it.`, warnings: result.warnings || [] };
+      setMessage(notice);
+      rememberNotice(`${kind}/${name}`, notice);
       await reload();
       return true;
     } catch (error) {
@@ -75,7 +77,7 @@ function CommandsSettings({ data, csrfToken, reload }) {
 
 function CommandEditor({ view, executors, csrfToken, reload }) {
   const [form, setForm] = useState(() => commandForm(view));
-  const { message, saving, save } = useSave(csrfToken, reload);
+  const { message, saving, save } = useSave(csrfToken, reload, `commands/${view.name}`);
   const update = (field) => (event) => setForm((current) => ({ ...current, [field]: event.target.value }));
   const executorName = form.executor || view.file?.executor || "";
   const executor = executors.find((candidate) => candidate.name === executorName);
@@ -130,7 +132,7 @@ function WorkflowsSettings({ data, csrfToken, reload }) {
 
 function WorkflowEditor({ view, commands, csrfToken, reload }) {
   const [steps, setSteps] = useState(() => workflowSteps(view));
-  const { message, saving, save } = useSave(csrfToken, reload);
+  const { message, saving, save } = useSave(csrfToken, reload, `workflows/${view.name}`);
   const setStep = (index, patch) => setSteps((current) => current.map((step, position) => position === index ? { ...step, ...patch } : step));
   return <Card className="space-y-4 p-5">
     <header className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-sm font-semibold">{view.name}</h2><Badge className="border-border bg-muted text-muted-foreground">{view.version ? sourceLabel(view) : "New"}</Badge></header>
@@ -160,14 +162,17 @@ function ExecutorsSettings({ data, csrfToken, reload }) {
 function ExecutorRow({ executor, csrfToken, reload }) {
   const [model, setModel] = useState(executor.override?.default_model || "");
   const [showHistory, setShowHistory] = useState(false);
-  const { message, saving, save } = useSave(csrfToken, reload);
+  const { message, saving, save } = useSave(csrfToken, reload, `executors/${executor.name}`);
   const offline = executor.workers.length === 0;
+  const mode = executorSaveMode(executor);
   return <article className="space-y-3 border-b border-border p-4 last:border-b-0 sm:px-5">
     <div className="grid gap-3 sm:grid-cols-[minmax(10rem,1fr)_minmax(12rem,1fr)_auto] sm:items-end">
       <div className="min-w-0"><h2 className="font-mono text-sm font-medium">{executor.name}</h2><p className="mt-1 text-xs text-muted-foreground">{offline ? "Not advertised by any registered worker" : `Workers: ${executor.workers.join(", ")}`}</p><p className="mt-1 text-xs text-muted-foreground">{executor.supports_model ? `Models: ${executor.models.length ? executor.models.join(", ") : "any"}` : "No model selection"}</p></div>
       <label><span className="field-label">Default model</span>{executor.any_model || !executor.models.length ? <input className="field-control" value={model} onChange={(event) => setModel(event.target.value)} maxLength={128} placeholder="Worker default" disabled={!executor.supports_model || offline} /> : <select className="field-control" value={model} onChange={(event) => setModel(event.target.value)} disabled={offline}><option value="">Worker default</option>{executor.models.map((alias) => <option key={alias} value={alias}>{alias}</option>)}</select>}</label>
       <div className="flex gap-2">
-        <Button type="button" disabled={saving || offline || !executor.supports_model} onClick={() => save("executors", executor.name, executor.version, model.trim() ? { default_model: model.trim() } : null)}>Save</Button>
+        {mode === "clear"
+          ? <Button type="button" variant="outline" disabled={saving} onClick={() => save("executors", executor.name, executor.version, null)}>Clear default</Button>
+          : <Button type="button" disabled={saving || mode === "none"} onClick={() => save("executors", executor.name, executor.version, model.trim() ? { default_model: model.trim() } : null)}>Save</Button>}
         {executor.version > 0 && <Button type="button" variant="ghost" size="icon" aria-label={`History for ${executor.name}`} aria-expanded={showHistory} onClick={() => setShowHistory((value) => !value)}><History className="size-4" /></Button>}
       </div>
     </div>

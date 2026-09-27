@@ -61,3 +61,22 @@ export async function settingsRequest(path, { method = "GET", body, csrfToken } 
   if (!response.ok) throw new Error(result.error || `Settings request failed (${response.status})`);
   return result;
 }
+
+// Save confirmations outlive the editor remount that the post-save reload causes (editors are keyed by version).
+const saveNotices = new Map();
+export function rememberNotice(key, message) {
+  saveNotices.set(key, message);
+}
+export function takeNotice(key) {
+  const message = saveNotices.get(key) ?? null;
+  saveNotices.delete(key);
+  return message;
+}
+
+// An executor's default model can be set only while a worker offers model selection, but a stored
+// default must stay clearable after the executor goes offline or stops supporting models.
+export function executorSaveMode(executor) {
+  const unavailable = executor.workers.length === 0 || !executor.supports_model;
+  if (!unavailable) return "save";
+  return executor.override ? "clear" : "none";
+}

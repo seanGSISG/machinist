@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { commandForm, commandOverride, describeVersion, moveStep, promptWarnings, settingsRequest, sourceLabel, workflowOverride, workflowSteps } from "./settings.js";
+import { commandForm, commandOverride, describeVersion, executorSaveMode, moveStep, promptWarnings, rememberNotice, settingsRequest, sourceLabel, takeNotice, workflowOverride, workflowSteps } from "./settings.js";
 
 test("prompt warnings trigger above 2 KB or 40 non-empty lines but never for small prompts", () => {
   assert.deepEqual(promptWarnings("Plan {{task.spec}}\n\n\n"), []);
@@ -42,4 +42,19 @@ test("settings mutations send the CSRF token and surface server errors", async (
   await assert.rejects(settingsRequest("/api/v1/settings/commands/plan", { method: "PUT", body: { base_version: 1, value: null }, csrfToken: "csrf_x" }), /this setting changed/);
   assert.equal(calls[0].options.headers["X-Machinist-CSRF"], "csrf_x");
   assert.equal(calls[0].options.body, JSON.stringify({ base_version: 1, value: null }));
+});
+
+test("save notices survive one editor remount, then clear", () => {
+  rememberNotice("commands/plan", { tone: "success", text: "Saved version 4." });
+  assert.equal(takeNotice("commands/plan").text, "Saved version 4.");
+  assert.equal(takeNotice("commands/plan"), null);
+  assert.equal(takeNotice("commands/other"), null);
+});
+
+test("stored executor defaults stay clearable when the executor can no longer take a model", () => {
+  const online = { workers: ["colo"], supports_model: true, override: null };
+  assert.equal(executorSaveMode(online), "save");
+  assert.equal(executorSaveMode({ ...online, workers: [] }), "none");
+  assert.equal(executorSaveMode({ ...online, workers: [], override: { default_model: "sol" } }), "clear");
+  assert.equal(executorSaveMode({ ...online, supports_model: false, override: { default_model: "sol" } }), "clear");
 });
