@@ -21,6 +21,7 @@ import (
 type Worker struct {
 	config         config.Worker
 	instanceID     string
+	incarnation    int64
 	client         *Client
 	stdout         io.Writer
 	stderr         io.Writer
@@ -42,21 +43,26 @@ func New(workerConfig config.Worker, stdout, stderr io.Writer) (*Worker, error) 
 	if err != nil {
 		return nil, err
 	}
-	instanceID, err := randomID("worker", 16)
+	instanceID, err := LoadOrCreateInstanceID(workerConfig.DataDirectory)
 	if err != nil {
 		return nil, err
+	}
+	incarnation := time.Now().UnixNano()
+	if incarnation <= 0 {
+		incarnation = 1
 	}
 	auth, err := newAuthAgent(workerConfig, client, instanceID, stderr)
 	if err != nil {
 		return nil, err
 	}
 	return &Worker{
-		config:     workerConfig,
-		instanceID: instanceID,
-		client:     client,
-		stdout:     stdout,
-		stderr:     stderr,
-		auth:       auth,
+		config:      workerConfig,
+		instanceID:  instanceID,
+		incarnation: incarnation,
+		client:      client,
+		stdout:      stdout,
+		stderr:      stderr,
+		auth:        auth,
 	}, nil
 }
 
@@ -157,6 +163,7 @@ func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 		Reviews:       true,
 		Workflows:     true,
 		Artifacts:     true,
+		Incarnation:   w.incarnation,
 		InstanceID:    w.instanceID,
 		Name:          w.config.Name,
 		Executors:     w.config.ExecutorNames(),
@@ -166,6 +173,9 @@ func (w *Worker) poll(ctx context.Context) (*protocol.RunSpec, error) {
 	var response protocol.PollResponse
 	if err := w.client.Post(ctx, "/api/v1/workers/poll", request, &response); err != nil {
 		return nil, err
+	}
+	if response.Run != nil {
+		w.incarnation = response.Run.Incarnation
 	}
 	return response.Run, nil
 }
