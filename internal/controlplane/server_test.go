@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -335,8 +336,13 @@ func TestServerServesEmbeddedReactAppAndRejectsRemoteListen(t *testing.T) {
 	if _, err := body.ReadFrom(response.Body); err != nil {
 		t.Fatal(err)
 	}
-	if response.StatusCode != http.StatusOK || !strings.Contains(body.String(), `<div id="root"></div>`) {
-		t.Fatalf("status = %d body = %q", response.StatusCode, body.String())
+	// The bundle is a build output: Linux CI builds it first, a Go-only build embeds just .gitkeep.
+	if _, err := fs.Stat(webAssets, "web/dist/index.html"); err == nil {
+		if response.StatusCode != http.StatusOK || !strings.Contains(body.String(), `<div id="root"></div>`) {
+			t.Fatalf("status = %d body = %q", response.StatusCode, body.String())
+		}
+	} else if response.StatusCode != http.StatusServiceUnavailable || !strings.Contains(body.String(), "web UI not built") {
+		t.Fatalf("without a built UI: status = %d body = %q", response.StatusCode, body.String())
 	}
 	if err := validateLoopbackListen("0.0.0.0:7331"); err == nil {
 		t.Fatal("expected non-loopback listen rejection")
