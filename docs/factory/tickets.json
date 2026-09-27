@@ -1,0 +1,449 @@
+[
+  {
+    "key": "T0",
+    "title": "FAC-06 S0: foundation hubs (migration 6, protocol fields, route stubs, events, config keys, UI route placeholders)",
+    "body": "## Goal\nLand every shared/hub change for FAC-06 Scope A in one slice so later slices only add new files or fill stubs.\n\n## Contract\n1. Migration 6 in internal/controlplane/store.go (current schema is user_version=5; continue the hand-rolled sequence, additive only, a v5 DB must upgrade in place without data loss):\n   - `job_labels(job_id TEXT, label_key TEXT, value TEXT, PRIMARY KEY(job_id,label_key))` + index on `(label_key,value)`\n   - `jobs.supersedes_job_id` (nullable)\n   - `runs.failure_class`, `runs.reset_at`, `runs.reset_source`, `runs.incarnation` (nullable)\n   - `workers.incarnation` (INTEGER default 0)\n   - `executor_state(worker, executor, unavailable_until, backoff_seconds, reset_source, updated_at, PRIMARY KEY(worker,executor))`\n   - `run_usage(run_id PRIMARY KEY, model, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens, created_at)`\n   - `events(id, type, subject_kind, subject_id, cause, payload_json, created_at)` + index on `(type, created_at)`\n   - `run_log_tail(run_id PRIMARY KEY, next_offset INTEGER, data BLOB, truncated INTEGER, updated_at)`\n   Fresh databases end at user_version=6.\n2. internal/controlplane/events.go: `type Event struct{Type, SubjectKind, SubjectID, Cause string; Payload any; CreatedAt time.Time}` and `AppendEvent(ctx, tx *sql.Tx, e Event) error` (store method) that inserts a row (payload marshalled to JSON) and mirrors it to slog. Event types used later: rate_limit_stall_start, rate_limit_stall_end, auth_change, cancel, usage.\n3. internal/protocol/protocol.go, all `omitempty`: `Completion{FailureClass string; ResetAt *time.Time; ResetSource string; Usage *Usage}`; `type Usage struct{Model string; InputTokens, OutputTokens, CachedInputTokens, ReasoningTokens int64}` (json snake_case); `PollRequest.Incarnation int64` (InstanceID already exists); `RunSpec.Incarnation int64` (RunSpec is the lease); `type LogChunk struct{Offset int64; Data []byte; Truncated bool}` (json offset/data/truncated).\n4. server.go `submitRequest` gains `Labels map[string]string \"labels,omitempty\"` and `SupersedesJobID string \"supersedes_job_id,omitempty\"` (decoded but ignored until T12).\n5. internal/config/config.go `Server` gains `RetentionDays *int toml:\"retention_days\"` (default 90) and `FinishedLimit *int toml:\"finished_limit\"` (default 50) with accessor methods; add commented `# retention_days = 90` / `# finished_limit = 50` lines under `[server]` in examples/config.toml. (The CP's section is `[server]`; `[control_plane]` is worker-side.)\n6. New internal/controlplane/routes_fac06.go: `func (s *Server) registerFAC06Routes(mux *http.ServeMux)`, called from the route table in server.go. Routes and the per-feature stub file that holds each handler (each stub writes 501 via a shared `notImplemented(w)` helper):\n   - GET /api/v1/jobs -> listJobs, GET /api/v1/jobs/{id} -> authorizeArtifact(jobDetail), GET /api/v1/runs/{id} -> authorizeArtifact(runDetail), GET /api/v1/events -> listEvents   [read_api.go]\n   - POST /api/v1/jobs/{id}/cancel -> authorizeSubmission(cancelJob)   [cancel.go]  (literal segment wins over existing /jobs/{id}/{action})\n   - POST /api/v1/executors/{worker}/{executor}/clear-rate-limit -> authorizeSubmission(clearRateLimit)   [executors_http.go]\n   - POST /api/v1/runs/{id}/log -> authorizeWorker(appendRunLog), GET /api/v1/runs/{id}/log -> authorizeArtifact(runLog)   [runlog.go]\n   - GET /api/v1/usage -> usageRollup   [usage_http.go]\n   - POST /api/v1/jobs/{id}/rewind -> authorizeSubmission(rewindJob)   [rewind.go]\n7. UI hash routes in src/routes.js (keep existing `#/runs/<jobID>` = job/task detail unchanged): `#/run/<runID>` -> {view:\"run\", runID}, `#/gate/<jobID>` -> {view:\"gate\", jobID}, `#/usage` -> {view:\"usage\"}. main.jsx renders placeholder components exported from new files src/run-detail.jsx (RunDetail), src/gate-panel.jsx (GatePanel), src/usage.jsx (UsagePage) and adds a Usage nav entry. Extend routes.test.js.\nTests in internal/controlplane/migration6_test.go: TestMigration6FreshDB (user_version=6, all tables/columns exist), TestMigration6UpgradesV5 (a v5 DB with a job+run upgrades, rows intact), TestMigration6RouteStubs (each new route answers 501 when authorized), TestAppendEvent.\n\n## Files owned\n- internal/controlplane/store.go\n- internal/controlplane/server.go\n- internal/controlplane/routes_fac06.go\n- internal/controlplane/events.go\n- internal/controlplane/migration6_test.go\n- internal/controlplane/read_api.go\n- internal/controlplane/cancel.go\n- internal/controlplane/executors_http.go\n- internal/controlplane/runlog.go\n- internal/controlplane/usage_http.go\n- internal/controlplane/rewind.go\n- internal/protocol/protocol.go\n- internal/config/config.go\n- examples/config.toml\n- internal/controlplane/web/src/routes.js\n- internal/controlplane/web/src/routes.test.js\n- internal/controlplane/web/src/main.jsx\n- internal/controlplane/web/src/run-detail.jsx\n- internal/controlplane/web/src/gate-panel.jsx\n- internal/controlplane/web/src/usage.jsx\n\n## Acceptance\n- `go test -race ./internal/controlplane -run 'TestMigration6|TestAppendEvent'` -> PASS\n- `go test -race ./internal/protocol ./internal/config` -> PASS\n- `cd internal/controlplane/web && npm ci && node --test src/routes.test.js` -> all tests pass\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [],
+    "owns": [
+      "internal/controlplane/store.go",
+      "internal/controlplane/server.go",
+      "internal/controlplane/routes_fac06.go",
+      "internal/controlplane/events.go",
+      "internal/controlplane/migration6_test.go",
+      "internal/controlplane/read_api.go",
+      "internal/controlplane/cancel.go",
+      "internal/controlplane/executors_http.go",
+      "internal/controlplane/runlog.go",
+      "internal/controlplane/usage_http.go",
+      "internal/controlplane/rewind.go",
+      "internal/protocol/protocol.go",
+      "internal/config/config.go",
+      "examples/config.toml",
+      "internal/controlplane/web/src/routes.js",
+      "internal/controlplane/web/src/routes.test.js",
+      "internal/controlplane/web/src/main.jsx",
+      "internal/controlplane/web/src/run-detail.jsx",
+      "internal/controlplane/web/src/gate-panel.jsx",
+      "internal/controlplane/web/src/usage.jsx"
+    ],
+    "acceptance": [
+      "go test -race ./internal/controlplane -run 'TestMigration6|TestAppendEvent' -> PASS",
+      "go test -race ./internal/protocol ./internal/config -> PASS",
+      "cd internal/controlplane/web && npm ci && node --test src/routes.test.js -> all tests pass",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T1",
+    "title": "FAC-06 S1: side-effect-free GET /status + retention pruning (D7, D27)",
+    "body": "## Goal\nGET handlers must only read. Move maintenance out of GET /api/v1/status and add retention pruning to the background scheduler.\n\n## Contract\n- Remove the `s.maintainState` call from `(*Server).status` in server.go (the scheduler loop at server.go ~L247 `loop(true, s.maintainState)` already runs it). This one-line deletion is the only server.go edit.\n- New internal/controlplane/retention.go: `func (s *Server) pruneRetention(ctx context.Context, now time.Time) error` deletes `events`, `run_usage` and `run_log_tail` rows whose created_at/updated_at is older than `now - Server.RetentionDays` (config `[server] retention_days`, default 90, accessor added in T0). Register it in the same scheduler loop (inside retention.go via a hook the loop calls, or one added line next to maintainState).\n- Tests in retention_test.go: TestStatusIsReadOnly (create a run with an expired lease, GET /api/v1/status, the run is still leased/unchanged), TestRetentionPrune (testing/synctest fake clock; rows at 91d are deleted, rows at 89d kept, custom retention_days respected).\n\n## Files owned\n- internal/controlplane/retention.go\n- internal/controlplane/retention_test.go\n- internal/controlplane/server.go\n\n## Acceptance\n- `go test -race ./internal/controlplane -run 'TestStatusIsReadOnly|TestRetentionPrune'` -> PASS\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T0"
+    ],
+    "owns": [
+      "internal/controlplane/retention.go",
+      "internal/controlplane/retention_test.go",
+      "internal/controlplane/server.go"
+    ],
+    "acceptance": [
+      "go test -race ./internal/controlplane -run 'TestStatusIsReadOnly|TestRetentionPrune' -> PASS",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T2",
+    "title": "FAC-06 S2: slim list/detail read API + /status v-schema (D8, D10, D25, D15)",
+    "body": "## Goal\nSlim /status and add list/detail endpoints so list bodies never carry prompt/spec text, and publish the stable /status v-schema that Scope B codes against.\n\n## Contract\nFill the stubs in read_api.go (created by T0) and add the schema structs.\n- GET /api/v1/status returns:\n```\n{ schema_version: 1, generated_at: RFC3339,\n  jobs: [slim job summary],            // no prompt, spec or rendered text; finished jobs capped at [server] finished_limit (default 50), active jobs never capped\n  connections: [...unchanged...],\n  executors: [], gates_awaiting_approval: [], blocked_jobs: [], logins: [],\n  ...all other existing top-level fields unchanged }\nexecutors item = {id, worker, executor, state:\"ok\"|\"rate_limited\", since, reason, message, rate_limited_until: RFC3339|null, reset_source:\"structured\"|\"regex\"|\"estimate\"|null}\nItem = {id, state, since: RFC3339, reason (CamelCase), message, html_url}\n```\n  The four arrays are always present (never null) and empty in this slice; T11 fills executors[], T14 fills the Item arrays. Put the Go structs in status_schema.go and the slim summary builder in job_summary.go.\n- GET /api/v1/jobs?state=&label=k:v&limit= -> {jobs:[slim summary]} (label filter joins job_labels).\n- GET /api/v1/jobs/{id} -> job detail (spec/prompt allowed) + at most 20 most recent runs; 404 unknown. Behind authorizeArtifact.\n- GET /api/v1/runs/{id} -> run detail incl. result, events, rendered_prompt; 404 unknown. Behind authorizeArtifact.\n- Contract for Scope B: every run object in /jobs/{id} runs[] and the /runs/{id} body ALWAYS has keys `failure_class` (string|null), `reset_at` (RFC3339|null), `reset_source` (\"structured\"|\"regex\"|\"estimate\"|null), read from the migration-6 columns (null until T10 writes them).\n- GET /api/v1/events?type=&since=RFC3339&limit= -> {events:[{id,type,subject_kind,subject_id,cause,payload,created_at}]} newest first.\n- Update existing UI code only if needed to compile; the UI switches to these APIs in T3.\nTests (read_api_test.go): TestStatusSlim (no prompt/spec substrings in /status or /jobs bodies; finished cap), TestStatusSchemaGolden (golden JSON under testdata asserting every v-schema key and the null failure_class/reset_at/reset_source keys; hand-rolled -update flag), TestJobDetail, TestRunDetail, TestDetailAuth (cross-origin GET without token -> 403; worker token -> 200), TestEventsAPI.\n\n## Files owned\n- internal/controlplane/read_api.go\n- internal/controlplane/read_api_test.go\n- internal/controlplane/job_summary.go\n- internal/controlplane/status_schema.go\n- internal/controlplane/testdata/status_schema.golden.json\n\n## Acceptance\n- `go test -race ./internal/controlplane -run 'TestStatusSlim|TestStatusSchemaGolden|TestJobDetail|TestRunDetail|TestDetailAuth|TestEventsAPI'` -> PASS\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T0",
+      "T1"
+    ],
+    "owns": [
+      "internal/controlplane/read_api.go",
+      "internal/controlplane/read_api_test.go",
+      "internal/controlplane/job_summary.go",
+      "internal/controlplane/status_schema.go",
+      "internal/controlplane/testdata/status_schema.golden.json"
+    ],
+    "acceptance": [
+      "go test -race ./internal/controlplane -run 'TestStatusSlim|TestStatusSchemaGolden|TestJobDetail|TestRunDetail|TestDetailAuth|TestEventsAPI' -> PASS",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T3",
+    "title": "FAC-06 S3: visibility-aware usePolling + UI on the slim API (D17)",
+    "body": "## Goal\nMake the UI poll through one visibility-aware hook and load job detail from the new detail endpoint instead of /status.\n\n## Contract\n- New src/use-polling.js: `usePolling(fetcher, intervalMs) -> {data, error, refresh}`. Polls every intervalMs while `document.visibilityState === \"visible\"`; pauses entirely while hidden; fetches immediately once when the tab becomes visible again; `refresh()` forces a fetch; cleans up timers/listeners on unmount. Export a framework-free core (e.g. `createPoller`) so it is testable with node:test mock.timers. No new npm dependencies.\n- status-loader.js is wrapped by usePolling (main.jsx uses it; later slices read new /status fields and do not edit the loader).\n- task-detail.jsx loads `GET /api/v1/jobs/{id}` when opened (prompt/spec now come from there, not /status) and shows runs from its runs[].\n- connections.jsx: replace both setInterval usages with usePolling.\n- Tests: src/use-polling.test.js (mock.timers: 0 fetches while hidden across several intervals, exactly 1 on becoming visible, interval resumes); keep status-ui.test.js and connections.test.js green (update fixtures for the slim schema).\n\n## Files owned\n- internal/controlplane/web/src/use-polling.js\n- internal/controlplane/web/src/use-polling.test.js\n- internal/controlplane/web/src/status-loader.js\n- internal/controlplane/web/src/task-detail.jsx\n- internal/controlplane/web/src/connections.jsx\n- internal/controlplane/web/src/main.jsx\n- internal/controlplane/web/src/status-ui.test.js\n- internal/controlplane/web/src/connections.test.js\n\n## Acceptance\n- `cd internal/controlplane/web && npm ci && node --test src/use-polling.test.js src/status-ui.test.js src/connections.test.js` -> all tests pass\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T2"
+    ],
+    "owns": [
+      "internal/controlplane/web/src/use-polling.js",
+      "internal/controlplane/web/src/use-polling.test.js",
+      "internal/controlplane/web/src/status-loader.js",
+      "internal/controlplane/web/src/task-detail.jsx",
+      "internal/controlplane/web/src/connections.jsx",
+      "internal/controlplane/web/src/main.jsx",
+      "internal/controlplane/web/src/status-ui.test.js",
+      "internal/controlplane/web/src/connections.test.js"
+    ],
+    "acceptance": [
+      "cd internal/controlplane/web && npm ci && node --test src/use-polling.test.js src/status-ui.test.js src/connections.test.js -> all tests pass",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T4",
+    "title": "FAC-06 S4: cancel semantics (D9)",
+    "body": "## Goal\nGive job cancellation precise, idempotent HTTP semantics and make workers treat 404/409 as terminal.\n\n## Contract\n- Implement `cancelJob` in internal/controlplane/cancel.go (stub from T0) for POST /api/v1/jobs/{id}/cancel: 202 if the job was active and is now cancelling/cancelled; 200 if already cancelled (idempotent); 409 if finished in any other state; 404 unknown. Body: `{job_id, state}`.\n- Direct (non-workflow) jobs go through a new `store.CancelDirectJob(ctx, id)`; workflow jobs keep using the existing WorkflowAction path.\n- Append a `cancel` event (AppendEvent from T0) in the same tx.\n- Export a helper usable inside another tx, e.g. `cancelJobTx(ctx, tx, id) (status int, err error)`, because T12 (supersede) reuses it.\n- internal/managedworker/worker.go: response handling only \u2014 a 404 or 409 from heartbeat or cancel-related calls stops the run cleanly (process killed, no retry loop, no failed completion spam).\n- Tests: cancel_test.go TestCancel* (all four codes, direct and workflow jobs, event appended); worker_test.go TestWorkerTerminalOn404 (fake CP returns 404 then 409 on heartbeat -> run stops, no further heartbeats).\n\n## Files owned\n- internal/controlplane/cancel.go\n- internal/controlplane/cancel_test.go\n- internal/managedworker/worker.go\n- internal/managedworker/worker_test.go\n\n## Acceptance\n- `go test -race ./internal/controlplane ./internal/managedworker -run 'TestCancel|TestWorkerTerminalOn404'` -> PASS\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T0"
+    ],
+    "owns": [
+      "internal/controlplane/cancel.go",
+      "internal/controlplane/cancel_test.go",
+      "internal/managedworker/worker.go",
+      "internal/managedworker/worker_test.go"
+    ],
+    "acceptance": [
+      "go test -race ./internal/controlplane ./internal/managedworker -run 'TestCancel|TestWorkerTerminalOn404' -> PASS",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T5",
+    "title": "FAC-06 S5: stable worker instance ID + incarnation (D6)",
+    "body": "## Goal\nWorkers get a persistent identity; a restarted worker process interrupts its own orphaned runs.\n\n## Contract\n- internal/managedworker/identity.go: `LoadOrCreateInstanceID(stateDir string) (string, error)` \u2014 UUIDv4 persisted at `<worker state dir>/instance_id` (0600, created atomically); reused on restart. The worker's existing `instanceID` field and PollRequest.InstanceID use it. Also track a per-process incarnation value the worker sends in `PollRequest.Incarnation` (0 = unknown, CP assigns).\n- internal/controlplane/incarnation.go: on the first poll from a (worker name, instance_id) whose process is new, bump `workers.incarnation`; stamp `runs.incarnation` when leasing (and set `RunSpec.Incarnation`); in the SAME transaction mark runs of that worker with an older incarnation still in `running` state as `interrupted`. Minimal hook call(s) in the existing poll/lease code are allowed.\n- Tests: identity_test.go TestInstanceIDPersists (same ID across two loads, new ID in a fresh dir); incarnation_test.go TestIncarnationInterrupts (lease a run, simulate restart poll, old run becomes interrupted, new lease gets higher incarnation).\n\n## Files owned\n- internal/managedworker/identity.go\n- internal/managedworker/identity_test.go\n- internal/managedworker/worker.go\n- internal/controlplane/incarnation.go\n- internal/controlplane/incarnation_test.go\n- internal/controlplane/store.go\n\n## Acceptance\n- `go test -race ./internal/managedworker ./internal/controlplane -run 'TestInstanceIDPersists|TestIncarnationInterrupts'` -> PASS\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T0"
+    ],
+    "owns": [
+      "internal/managedworker/identity.go",
+      "internal/managedworker/identity_test.go",
+      "internal/managedworker/worker.go",
+      "internal/controlplane/incarnation.go",
+      "internal/controlplane/incarnation_test.go",
+      "internal/controlplane/store.go"
+    ],
+    "acceptance": [
+      "go test -race ./internal/managedworker ./internal/controlplane -run 'TestInstanceIDPersists|TestIncarnationInterrupts' -> PASS",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T6",
+    "title": "FAC-06 S6: per-entry config validation + `machinist config validate` (D20)",
+    "body": "## Goal\nOne bad command entry must not take down the control plane, and operators get a validator CLI.\n\n## Contract\n- internal/config/validate.go: two-phase load. Phase 1 parses the TOML file; a syntax error returns an error and the running CP keeps its last good config. Phase 2 decodes/validates each `[commands.*]` (and workflow) entry separately; a bad entry becomes `InvalidCommand{Name string; Reason string}` with Reason formatted `file:line:col: message` (go-toml positions) and is excluded from the loaded config. Expose `ValidateFile(path) (Report, error)`.\n- /api/v1/status gains top-level `invalid_commands: [{name, reason}]` (always present, [] when none). Minimal wiring in the CP config load/status path is allowed.\n- internal/cli/config_cmd.go: `machinist config validate [--config PATH] [--json]`; human output lists problems; --json prints `{valid: bool, invalid_commands:[{name,reason}], error: string|null}`; exit 0 when valid, 1 on any error. Register the `config` group with ONE line in internal/cli/root.go.\n- Tests: validate_test.go TestPerEntryValidation (one good + one bad entry -> good loads, bad reported with file:line:col; syntax error -> error); config_cmd_test.go TestConfigValidateCmd (exit codes, --json shape).\n\n## Files owned\n- internal/config/validate.go\n- internal/config/validate_test.go\n- internal/config/config.go\n- internal/cli/config_cmd.go\n- internal/cli/config_cmd_test.go\n- internal/cli/root.go\n- internal/controlplane/server.go\n\n## Acceptance\n- `go test -race ./internal/config ./internal/cli -run 'TestPerEntryValidation|TestConfigValidateCmd'` -> PASS\n- `go run ./cmd/machinist config validate --config examples/config.toml` -> exit 0\n- `go run ./cmd/machinist config validate --config examples/config.toml --json` -> exit 0 and stdout JSON with \"valid\": true\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T0"
+    ],
+    "owns": [
+      "internal/config/validate.go",
+      "internal/config/validate_test.go",
+      "internal/config/config.go",
+      "internal/cli/config_cmd.go",
+      "internal/cli/config_cmd_test.go",
+      "internal/cli/root.go",
+      "internal/controlplane/server.go"
+    ],
+    "acceptance": [
+      "go test -race ./internal/config ./internal/cli -run 'TestPerEntryValidation|TestConfigValidateCmd' -> PASS",
+      "go run ./cmd/machinist config validate --config examples/config.toml -> exit 0",
+      "go run ./cmd/machinist config validate --config examples/config.toml --json -> exit 0 and stdout JSON with \"valid\": true",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T7",
+    "title": "FAC-06 S7: login hysteresis state machine (D5)",
+    "body": "## Goal\nStop a single flaky auth check from marking an executor login expired.\n\n## Contract\n- internal/controlplane/auth_hysteresis.go: `type authFSM struct{...}`; `Observe(result CheckResult, now time.Time) (state string, recheckAt time.Time)`. States: `ok`, `rechecking`, `expired`. Rules: first soft failure from ok -> `rechecking` with a fast recheck (e.g. now+30s); a second consecutive soft failure -> `expired`; any success -> `ok` and resets the counter; a past `expires_at` or an explicit 401/logout -> `expired` immediately. Clock and checker injected.\n- Wire it at the existing auth-state update call site in auth_store.go; on every state change append an `auth_change` event (subject = worker/executor, payload {from,to}).\n- Tests: auth_hysteresis_test.go TestAuthHysteresis (table-driven, testing/synctest), covering each rule and the event.\n\n## Files owned\n- internal/controlplane/auth_hysteresis.go\n- internal/controlplane/auth_hysteresis_test.go\n- internal/controlplane/auth_store.go\n\n## Acceptance\n- `go test -race ./internal/controlplane -run TestAuthHysteresis` -> PASS\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T0"
+    ],
+    "owns": [
+      "internal/controlplane/auth_hysteresis.go",
+      "internal/controlplane/auth_hysteresis_test.go",
+      "internal/controlplane/auth_store.go"
+    ],
+    "acceptance": [
+      "go test -race ./internal/controlplane -run TestAuthHysteresis -> PASS",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T8",
+    "title": "FAC-06 S8: capped line reader + shape-based usage detection (D1, D2)",
+    "body": "## Goal\nNever lose the output stream on a long line, and detect token usage from the JSON event shape instead of argv.\n\n## Contract\n- internal/runner/linereader.go: `LineReader(r io.Reader, maxLine int)` built on bufio.Reader (NOT bufio.Scanner); default maxLine 1 MiB; yields each line plus a `Truncated bool` when a line exceeded the cap (the rest of that line is discarded, reading continues).\n- internal/runner/usage_shape.go: `Detect(line []byte) (protocol.Usage, bool)` picks a parser by JSON event shape: claude `{\"type\":\"result\",...usage}` / `message_delta` usage, codex `turn.completed` usage. Argv (e.g. `agent-run --contract` wrappers) is only a hint. Refactor codex_usage.go's structuredUsageCollector to use LineReader+Detect; contract/revision injection behaviour must not change.\n- Golden fixtures: internal/runner/testdata/streams/*.jsonl with expected usage, hand-rolled `-update` flag. Include a claude stream, a codex stream, an `agent-run --contract` wrapped stream, and a stream containing a >64 KiB line.\n- Worker sends `Completion.Usage`; CP: internal/controlplane/usage_store.go writes one `run_usage` row on complete (and a `usage` event).\n- Tests: TestLineReader, TestUsageShape (runner); TestRunUsageWritten (controlplane).\n\n## Files owned\n- internal/runner/linereader.go\n- internal/runner/linereader_test.go\n- internal/runner/usage_shape.go\n- internal/runner/usage_shape_test.go\n- internal/runner/testdata/streams/\n- internal/runner/codex_usage.go\n- internal/runner/runner.go\n- internal/managedworker/worker.go\n- internal/controlplane/usage_store.go\n- internal/controlplane/usage_store_test.go\n\n## Acceptance\n- `go test -race ./internal/runner -run 'TestLineReader|TestUsageShape'` -> PASS\n- `go test -race ./internal/runner` -> PASS (existing codex/claude usage tests still green)\n- `go test -race ./internal/controlplane -run TestRunUsageWritten` -> PASS\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T0"
+    ],
+    "owns": [
+      "internal/runner/linereader.go",
+      "internal/runner/linereader_test.go",
+      "internal/runner/usage_shape.go",
+      "internal/runner/usage_shape_test.go",
+      "internal/runner/testdata/streams/",
+      "internal/runner/codex_usage.go",
+      "internal/runner/runner.go",
+      "internal/managedworker/worker.go",
+      "internal/controlplane/usage_store.go",
+      "internal/controlplane/usage_store_test.go"
+    ],
+    "acceptance": [
+      "go test -race ./internal/runner -run 'TestLineReader|TestUsageShape' -> PASS",
+      "go test -race ./internal/runner -> PASS (existing codex/claude usage tests still green)",
+      "go test -race ./internal/controlplane -run TestRunUsageWritten -> PASS",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T9",
+    "title": "FAC-06 S9: rate-limit classifier (D3)",
+    "body": "## Goal\nClassify a failed agent run as rate-limited and estimate when the limit resets.\n\n## Contract\n- internal/runner/ratelimit.go: `Classify(lines [][]byte, exitCode int, now time.Time, prevBackoff time.Duration) (Result, bool)`; `Result{Limited bool; ResetAt time.Time; Source string /* structured|regex|estimate */; Backoff time.Duration}`. Order: (1) structured fields in JSON lines (`resetsAt`, `retry-after`, `retryDelay`); (2) vendor regex table in ratelimit_table.go (claude/codex/gemini usage-limit texts, incl. relative and absolute reset phrasings); (3) if a limit/spend-cap is detected but no time found: capped backoff estimate starting 60s, doubling from prevBackoff, capped at 1h.\n- The runner/worker sets `Completion.FailureClass=\"rate_limited\"`, `ResetAt`, `ResetSource` from the result (use LineReader from T8 to collect lines).\n- Fixtures in internal/runner/testdata/ratelimit/ (one per vendor/phrasing plus non-limited failures).\n- Tests: TestClassifyRateLimit (table over fixtures: structured wins over regex; regex parsing; estimate doubling and 1h cap; non-limited failure -> ok=false).\n\n## Files owned\n- internal/runner/ratelimit.go\n- internal/runner/ratelimit_table.go\n- internal/runner/ratelimit_test.go\n- internal/runner/testdata/ratelimit/\n- internal/runner/runner.go\n\n## Acceptance\n- `go test -race ./internal/runner -run TestClassifyRateLimit` -> PASS\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T0",
+      "T8"
+    ],
+    "owns": [
+      "internal/runner/ratelimit.go",
+      "internal/runner/ratelimit_table.go",
+      "internal/runner/ratelimit_test.go",
+      "internal/runner/testdata/ratelimit/",
+      "internal/runner/runner.go"
+    ],
+    "acceptance": [
+      "go test -race ./internal/runner -run TestClassifyRateLimit -> PASS",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T10",
+    "title": "FAC-06 S10: rate-limit store, lease skip, infra requeue (D4, D15)",
+    "body": "## Goal\nA rate-limited completion parks the executor until reset and requeues the job without burning an attempt.\n\n## Contract\n- internal/controlplane/ratelimit_store.go: in `complete`, when `Completion.FailureClass==\"rate_limited\"`, in ONE `BEGIN IMMEDIATE` tx: write runs.failure_class/reset_at/reset_source; upsert executor_state(worker, executor) with unavailable_until=ResetAt (or now+backoff), backoff_seconds, reset_source, updated_at; requeue the job as an infrastructure retry (does NOT count against the attempt budget); AppendEvent `rate_limit_stall_start` (subject executor, payload {worker, executor, until, source}).\n- Lease query skips executors whose `unavailable_until > now` for that worker; the first successful lease on an executor after expiry clears the row's unavailable_until and appends `rate_limit_stall_end` (cause `expired`).\n- Also persist failure_class/reset_at/reset_source for any completion that carries them (so T2's run fields are non-null).\n- Minimal hook calls in the existing complete/lease code paths are allowed.\n- Tests (fake completions, synctest clock): TestRateLimitRequeue (attempt count unchanged, job queued again, event, run columns set), TestLeaseSkipsLimitedExecutor (no lease before reset, lease after, stall_end event once).\n\n## Files owned\n- internal/controlplane/ratelimit_store.go\n- internal/controlplane/ratelimit_store_test.go\n- internal/controlplane/server.go\n- internal/controlplane/store.go\n\n## Acceptance\n- `go test -race ./internal/controlplane -run 'TestRateLimitRequeue|TestLeaseSkipsLimitedExecutor'` -> PASS\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T0",
+      "T9"
+    ],
+    "owns": [
+      "internal/controlplane/ratelimit_store.go",
+      "internal/controlplane/ratelimit_store_test.go",
+      "internal/controlplane/server.go",
+      "internal/controlplane/store.go"
+    ],
+    "acceptance": [
+      "go test -race ./internal/controlplane -run 'TestRateLimitRequeue|TestLeaseSkipsLimitedExecutor' -> PASS",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T11",
+    "title": "FAC-06 S11: executors in /status + operator clear + UI badge (D10, D26)",
+    "body": "## Goal\nShow rate-limited executors to operators and let them clear a limit early.\n\n## Contract\n- internal/controlplane/executors_http.go: fill /api/v1/status `executors[]` exactly per the T2 v-schema item `{id, worker, executor, state:\"ok\"|\"rate_limited\", since, reason, message, rate_limited_until, reset_source}` from executor_state + known worker executors (id = \"worker/executor\"; reason CamelCase e.g. \"RateLimited\"). Do not rename/drop/retype any field.\n- Implement `clearRateLimit` (stub from T0): POST /api/v1/executors/{worker}/{executor}/clear-rate-limit (authorizeSubmission) -> 200 `{worker, executor, state:\"ok\"}`; sets unavailable_until NULL and appends `rate_limit_stall_end` with cause `operator`; 404 if the worker/executor is unknown; 200 no-op if not limited.\n- UI: src/executor-badge.jsx renders \"rate limited until HH:MM\" plus \" (est.)\" when reset_source==\"estimate\", and a Clear button calling the route (with the same CSRF/same-origin conventions as other mutating UI calls). Render it for each executor in connections.jsx. Pure formatting logic exported for tests.\n- Tests: TestExecutorClear (status shows rate_limited, clear -> ok + event with cause operator, auth required); src/executor-badge.test.js (label text incl. (est.), button posts to the right URL).\n\n## Files owned\n- internal/controlplane/executors_http.go\n- internal/controlplane/executors_http_test.go\n- internal/controlplane/web/src/executor-badge.jsx\n- internal/controlplane/web/src/executor-badge.test.js\n- internal/controlplane/web/src/connections.jsx\n\n## Acceptance\n- `go test -race ./internal/controlplane -run TestExecutorClear` -> PASS\n- `cd internal/controlplane/web && npm ci && node --test src/executor-badge.test.js` -> all tests pass\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T2",
+      "T3",
+      "T10"
+    ],
+    "owns": [
+      "internal/controlplane/executors_http.go",
+      "internal/controlplane/executors_http_test.go",
+      "internal/controlplane/web/src/executor-badge.jsx",
+      "internal/controlplane/web/src/executor-badge.test.js",
+      "internal/controlplane/web/src/connections.jsx"
+    ],
+    "acceptance": [
+      "go test -race ./internal/controlplane -run TestExecutorClear -> PASS",
+      "cd internal/controlplane/web && npm ci && node --test src/executor-badge.test.js -> all tests pass",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T12",
+    "title": "FAC-06 S12: job labels + atomic supersede (D12, D13)",
+    "body": "## Goal\nLet the Scope B dispatcher tag jobs with ticket/round/branch and replace a job atomically.\n\n## Contract\n- POST /api/v1/jobs body gains `labels: {k: v}` and `supersedes_job_id` (fields added to submitRequest in T0). In ONE `BEGIN IMMEDIATE` tx (internal/controlplane/labels.go): insert job, insert job_labels rows, set jobs.supersedes_job_id, and cancel the superseded job via T4's `cancelJobTx`. If the superseded job already finished in a state other than cancelled -> 409 and nothing is inserted; unknown superseded id -> 404. Label keys: non-empty, [a-z0-9_.-], \u226464 chars; values \u2264256 chars; else 400.\n- Slim job summaries (/status jobs[], /jobs) carry `labels` ({} when none) and derived `superseded: bool` (true when another job supersedes it). GET /jobs?label=k:v filters on it.\n- CLI contract for Scope B: `machinist submit --label k=v` (repeatable; later duplicate key wins) and `--supersedes JOB_ID`, mapping 1:1 onto the body. Fixed label names used by the dispatcher: `ticket`, `round`, `branch`; other keys are free-form. Edit only the submit command/submitJobRequest in internal/cli/root.go.\n- Tests: labels_test.go TestSubmitLabels, TestSupersedeAtomic (old cancelled + new inserted together; 409 path inserts nothing); internal/cli TestSubmitLabelFlags (httptest server captures body).\n\n## Files owned\n- internal/controlplane/labels.go\n- internal/controlplane/labels_test.go\n- internal/controlplane/server.go\n- internal/controlplane/job_summary.go\n- internal/cli/root.go\n- internal/cli/root_test.go\n\n## Acceptance\n- `go test -race ./internal/controlplane ./internal/cli -run 'TestSubmitLabels|TestSupersedeAtomic|TestSubmitLabelFlags'` -> PASS\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T0",
+      "T2",
+      "T4"
+    ],
+    "owns": [
+      "internal/controlplane/labels.go",
+      "internal/controlplane/labels_test.go",
+      "internal/controlplane/server.go",
+      "internal/controlplane/job_summary.go",
+      "internal/cli/root.go",
+      "internal/cli/root_test.go"
+    ],
+    "acceptance": [
+      "go test -race ./internal/controlplane ./internal/cli -run 'TestSubmitLabels|TestSupersedeAtomic|TestSubmitLabelFlags' -> PASS",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T13",
+    "title": "FAC-06 S13: ticket board UI (D19)",
+    "body": "## Goal\nGroup the runs board by ticket and hide superseded noise, with a mobile-friendly layout.\n\n## Contract\n- src/ticket-board.js (pure logic): `groupJobs(jobs, mode /* \"none\"|\"ticket\" */)` groups by `labels.ticket` (jobs without it under \"No ticket\"), sorted by most recent activity; `visibleJobs(jobs, {showSuperseded})` hides jobs with `superseded && state===\"cancelled\"` unless showSuperseded.\n- runs-board.js: Finished column capped (use the server cap; show \"N more\" when truncated) and reuse the helpers.\n- main.jsx: a group-by toggle (none/ticket) and a \"show superseded\" toggle on the runs view; group headers `sticky top-0`; mobile bottom nav padded with `env(safe-area-inset-bottom)` and page container `min-h-dvh`. Plain Tailwind, no new dependencies.\n- Tests: src/ticket-board.test.js; keep src/runs-board.test.js green.\n\n## Files owned\n- internal/controlplane/web/src/ticket-board.js\n- internal/controlplane/web/src/ticket-board.test.js\n- internal/controlplane/web/src/runs-board.js\n- internal/controlplane/web/src/runs-board.test.js\n- internal/controlplane/web/src/main.jsx\n\n## Acceptance\n- `cd internal/controlplane/web && npm ci && node --test src/ticket-board.test.js src/runs-board.test.js` -> all tests pass\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T3",
+      "T12"
+    ],
+    "owns": [
+      "internal/controlplane/web/src/ticket-board.js",
+      "internal/controlplane/web/src/ticket-board.test.js",
+      "internal/controlplane/web/src/runs-board.js",
+      "internal/controlplane/web/src/runs-board.test.js",
+      "internal/controlplane/web/src/main.jsx"
+    ],
+    "acceptance": [
+      "cd internal/controlplane/web && npm ci && node --test src/ticket-board.test.js src/runs-board.test.js -> all tests pass",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T14",
+    "title": "FAC-06 S14: Needs-me attention (D10, D11)",
+    "body": "## Goal\nSurface everything waiting on a human, from one server-derived source the UI and the Scope B bot share.\n\n## Contract\n- internal/controlplane/attention.go: derive on read `attention_reason` (CamelCase, e.g. GateAwaitingApproval, Blocked, LoginExpired; null if none) and `waiting_since` (RFC3339|null) on slim job summaries; fill /api/v1/status `gates_awaiting_approval[]`, `blocked_jobs[]`, `logins[]` with `Item {id, state, since, reason, message, html_url}` exactly per the T2 v-schema (no renamed/dropped/retyped fields; connections[] untouched). html_url: gates -> `<base>/#/gate/<jobID>`, blocked -> `<base>/#/runs/<jobID>`, logins -> `<base>/#/connections`. logins[] uses the T7 auth state (expired or rechecking).\n- src/needs-me.js (pure): `needsMe(status) -> items`, `titleFor(count) -> \"(N) Machinist\" | \"Machinist\"`, `relativeAge(since, now)` via Intl.RelativeTimeFormat, tone = icon+text (not colour alone). main.jsx: a \"Needs me\" filter and document.title update.\n- Tests: TestAttentionDerived (gate, blocked, expired login each appear once with correct fields/html_url); src/needs-me.test.js.\n\n## Files owned\n- internal/controlplane/attention.go\n- internal/controlplane/attention_test.go\n- internal/controlplane/job_summary.go\n- internal/controlplane/web/src/needs-me.js\n- internal/controlplane/web/src/needs-me.test.js\n- internal/controlplane/web/src/main.jsx\n\n## Acceptance\n- `go test -race ./internal/controlplane -run TestAttentionDerived` -> PASS\n- `cd internal/controlplane/web && npm ci && node --test src/needs-me.test.js` -> all tests pass\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T2",
+      "T3",
+      "T7",
+      "T13"
+    ],
+    "owns": [
+      "internal/controlplane/attention.go",
+      "internal/controlplane/attention_test.go",
+      "internal/controlplane/job_summary.go",
+      "internal/controlplane/web/src/needs-me.js",
+      "internal/controlplane/web/src/needs-me.test.js",
+      "internal/controlplane/web/src/main.jsx"
+    ],
+    "acceptance": [
+      "go test -race ./internal/controlplane -run TestAttentionDerived -> PASS",
+      "cd internal/controlplane/web && npm ci && node --test src/needs-me.test.js -> all tests pass",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T15",
+    "title": "FAC-06 S15: gate review panel (D18, D19)",
+    "body": "## Goal\nLet a reviewer read the gated artifact and approve/request changes from a phone.\n\n## Contract\n- Replace the T0 placeholder in src/gate-panel.jsx: route `#/gate/<jobID>` loads the job detail (GET /api/v1/jobs/{id}) and the gated artifact (existing artifact routes), renders markdown with `react-markdown` WITHOUT rehype-raw (raw HTML must render as text, never innerHTML), and a `sticky bottom-0` action bar padded with `env(safe-area-inset-bottom)` with Approve and Request changes buttons that call the existing POST /api/v1/jobs/{id}/{action} route (same actions the task detail uses).\n- Add `react-markdown` to internal/controlplane/web/package.json and update package-lock.json (`npm install react-markdown`). This is the only ticket that edits package.json.\n- Tests: src/gate-panel.test.js (jsdom: `<script>alert(1)</script>` in markdown renders as text and no script element exists; buttons post to the right action URLs).\n\n## Files owned\n- internal/controlplane/web/src/gate-panel.jsx\n- internal/controlplane/web/src/gate-panel.test.js\n- internal/controlplane/web/package.json\n- internal/controlplane/web/package-lock.json\n\n## Acceptance\n- `cd internal/controlplane/web && npm ci && node --test src/gate-panel.test.js` -> all tests pass\n- `just frontend` -> exit 0\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T3",
+      "T14"
+    ],
+    "owns": [
+      "internal/controlplane/web/src/gate-panel.jsx",
+      "internal/controlplane/web/src/gate-panel.test.js",
+      "internal/controlplane/web/package.json",
+      "internal/controlplane/web/package-lock.json"
+    ],
+    "acceptance": [
+      "cd internal/controlplane/web && npm ci && node --test src/gate-panel.test.js -> all tests pass",
+      "just frontend -> exit 0",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T16",
+    "title": "FAC-06 S16: live log backend (D16)",
+    "body": "## Goal\nShip a bounded live log tail from worker to control plane over its own endpoint, separate from heartbeats.\n\n## Contract\n- internal/runner/logring.go: bounded ring buffer of recent output (fed from the T8 LineReader path) that tracks a monotonically increasing byte offset; `Since(offset) (chunk []byte, next int64, truncated bool)`.\n- internal/managedworker/logship.go: while a run is active, periodically POST /api/v1/runs/{id}/log with body protocol.LogChunk{Offset, Data, Truncated} (\u226416 KiB per request; if more is pending, drop the excess and set Truncated). Independent goroutine, never blocks or delays heartbeats; failures are logged and retried next tick; stops at completion.\n- internal/controlplane/runlog.go (stubs from T0): appendRunLog (authorizeWorker, lease token checked as for heartbeat) appends to run_log_tail keeping only the last 256 KiB, ignoring chunks whose offset < stored next_offset (idempotent), 204 on success; runLog (authorizeArtifact) GET /api/v1/runs/{id}/log?offset=N -> `{offset, next_offset, data (string), truncated, done}` where done=true once the run is finished.\n- Tests: TestLogRing, TestLogShip (fake CP; 16 KiB cap; heartbeat not delayed), TestRunLogOffsets (duplicate offset ignored, 256 KiB cap, done flag, auth).\n\n## Files owned\n- internal/runner/logring.go\n- internal/runner/logring_test.go\n- internal/runner/runner.go\n- internal/managedworker/logship.go\n- internal/managedworker/logship_test.go\n- internal/managedworker/worker.go\n- internal/controlplane/runlog.go\n- internal/controlplane/runlog_test.go\n\n## Acceptance\n- `go test -race ./internal/runner ./internal/managedworker ./internal/controlplane -run 'TestLogRing|TestLogShip|TestRunLogOffsets'` -> PASS\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T0",
+      "T2",
+      "T8"
+    ],
+    "owns": [
+      "internal/runner/logring.go",
+      "internal/runner/logring_test.go",
+      "internal/runner/runner.go",
+      "internal/managedworker/logship.go",
+      "internal/managedworker/logship_test.go",
+      "internal/managedworker/worker.go",
+      "internal/controlplane/runlog.go",
+      "internal/controlplane/runlog_test.go"
+    ],
+    "acceptance": [
+      "go test -race ./internal/runner ./internal/managedworker ./internal/controlplane -run 'TestLogRing|TestLogShip|TestRunLogOffsets' -> PASS",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T17",
+    "title": "FAC-06 S17: run detail page + live log pane",
+    "body": "## Goal\nGive each run its own page with result, events, prompt and a live log.\n\n## Contract\n- Replace the T0 placeholder src/run-detail.jsx (route `#/run/<runID>`): loads GET /api/v1/runs/{id} (result, events, rendered_prompt, failure_class/reset_at) and a log pane.\n- src/run-log.js (pure): `createLogFollower(fetchLog)` that polls GET /api/v1/runs/{id}/log?offset=N via usePolling (T3), appends `data`, advances to next_offset, shows a truncation marker when truncated, and STOPS polling once done=true.\n- task-detail.jsx: link each run in the runs list to `#/run/<runID>`.\n- Tests: src/run-log.test.js (mock.timers/fake fetch: offsets advance, duplicate data not appended, polling stops on done).\n\n## Files owned\n- internal/controlplane/web/src/run-detail.jsx\n- internal/controlplane/web/src/run-log.js\n- internal/controlplane/web/src/run-log.test.js\n- internal/controlplane/web/src/task-detail.jsx\n\n## Acceptance\n- `cd internal/controlplane/web && npm ci && node --test src/run-log.test.js` -> all tests pass\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T3",
+      "T16"
+    ],
+    "owns": [
+      "internal/controlplane/web/src/run-detail.jsx",
+      "internal/controlplane/web/src/run-log.js",
+      "internal/controlplane/web/src/run-log.test.js",
+      "internal/controlplane/web/src/task-detail.jsx"
+    ],
+    "acceptance": [
+      "cd internal/controlplane/web && npm ci && node --test src/run-log.test.js -> all tests pass",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T18",
+    "title": "FAC-06 S18: usage rollups (D14)",
+    "body": "## Goal\nReport token usage by executor, model, command or ticket without aggregate tables.\n\n## Contract\n- internal/controlplane/usage_http.go (stub from T0): GET /api/v1/usage?group_by=executor|model|command|ticket&since=RFC3339 -> `{group_by, since, rows:[{key, runs, input_tokens, output_tokens, cached_input_tokens, reasoning_tokens}]}` computed with GROUP BY over run_usage joined to runs/jobs (`ticket` joins job_labels where label_key='ticket'; missing -> key \"\"). 400 on unknown group_by or bad since. Sorted by input_tokens desc.\n- UI: replace the T0 placeholder src/usage.jsx (route `#/usage`) with a group-by selector and table; pure state/format logic in src/usage-state.js.\n- Tests: TestUsageRollup (fixture runs across two executors/models/tickets, each group_by, since filter); src/usage-state.test.js.\n\n## Files owned\n- internal/controlplane/usage_http.go\n- internal/controlplane/usage_http_test.go\n- internal/controlplane/web/src/usage.jsx\n- internal/controlplane/web/src/usage-state.js\n- internal/controlplane/web/src/usage-state.test.js\n\n## Acceptance\n- `go test -race ./internal/controlplane -run TestUsageRollup` -> PASS\n- `cd internal/controlplane/web && npm ci && node --test src/usage-state.test.js` -> all tests pass\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T3",
+      "T8",
+      "T12"
+    ],
+    "owns": [
+      "internal/controlplane/usage_http.go",
+      "internal/controlplane/usage_http_test.go",
+      "internal/controlplane/web/src/usage.jsx",
+      "internal/controlplane/web/src/usage-state.js",
+      "internal/controlplane/web/src/usage-state.test.js"
+    ],
+    "acceptance": [
+      "go test -race ./internal/controlplane -run TestUsageRollup -> PASS",
+      "cd internal/controlplane/web && npm ci && node --test src/usage-state.test.js -> all tests pass",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T19",
+    "title": "FAC-06 S19: append-only rewind / retry-to-step (D21, E8 part 1)",
+    "body": "## Goal\nLet an operator rewind a workflow job to an earlier step without mutating history.\n\n## Contract\n- Migration 7 in internal/controlplane/store.go (after T0's migration 6; fresh DB ends at user_version=7, a v6 DB upgrades): `workflow_attempts` gains `attempt INTEGER`, `previous_run_id TEXT`, `reason TEXT` (rewind|loop|retry); new table `workflow_loop_counters(job_id, edge, count, PRIMARY KEY(job_id, edge))`.\n- internal/controlplane/rewind.go (stub from T0): POST /api/v1/jobs/{id}/rewind body `{step, reason}` -> 202 `{job_id, step, attempt}`; in one BEGIN IMMEDIATE tx appends a new attempt row (attempt = previous+1, previous_run_id = last run of that step, reason) and queues the step; finished run/attempt rows are never updated. 404 unknown job, 400 unknown step or reason, 409 if the job is not a workflow job or is active in that step. Uses T4 cancel helper to stop in-flight later steps.\n- Tests: TestMigration7 (fresh + v6 upgrade), TestRewindAppends (row count grows, old rows byte-identical, 202 body).\n\n## Files owned\n- internal/controlplane/rewind.go\n- internal/controlplane/rewind_test.go\n- internal/controlplane/store.go\n\n## Acceptance\n- `go test -race ./internal/controlplane -run 'TestRewindAppends|TestMigration7'` -> PASS\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T4",
+      "T12"
+    ],
+    "owns": [
+      "internal/controlplane/rewind.go",
+      "internal/controlplane/rewind_test.go",
+      "internal/controlplane/store.go"
+    ],
+    "acceptance": [
+      "go test -race ./internal/controlplane -run 'TestRewindAppends|TestMigration7' -> PASS",
+      "just check -> exit 0"
+    ]
+  },
+  {
+    "key": "T20",
+    "title": "FAC-06 S20: on_blocked = {goto, max} workflow step field (E8 part 2)",
+    "body": "## Goal\nLet a workflow step loop back to an earlier step when blocked, a bounded number of times.\n\n## Contract\n- internal/config/on_blocked.go: workflow step TOML field `on_blocked = { goto = \"<step>\", max = N }` (N \u2265 1); validation: goto must name an earlier step of the same workflow, max required; errors reported like other workflow validation errors. Add the field to the step struct in internal/config/workflows.go.\n- internal/controlplane/on_blocked.go: when a step completes blocked and has on_blocked, inside the insert tx read/increment `workflow_loop_counters(job_id, edge=\"<from>-><goto>\")`; if count < max, append a new attempt with reason `loop` (reusing T19's rewind append) targeting goto; at max the job stays blocked (normal blocked behaviour, visible in /status blocked_jobs).\n- Tests: TestOnBlockedGoto (config parse/validation + a blocked step loops back and the counter increments), TestOnBlockedMax (after max loops the job stays blocked).\n\n## Files owned\n- internal/config/on_blocked.go\n- internal/config/on_blocked_test.go\n- internal/config/workflows.go\n- internal/controlplane/on_blocked.go\n- internal/controlplane/on_blocked_test.go\n- internal/controlplane/workflows.go\n\n## Acceptance\n- `go test -race ./internal/config ./internal/controlplane -run 'TestOnBlockedGoto|TestOnBlockedMax'` -> PASS\n- `just check` -> exit 0\n\nContext: repo seanGSISG/machinist (Go 1.26 control plane + managed worker, React/Vite UI in internal/controlplane/web, hash routing in src/routes.js). This is FAC-06 Scope A; design decisions D1-D27 are in the approved design.md, slices S0-S20 in structure.md. Rules: new Go code goes in new per-feature files; shared structs only gain optional `omitempty` fields; schema changes are hand-rolled `PRAGMA user_version` migrations in internal/controlplane/store.go; tests are offline (httptest, testing/synctest for time, golden fixtures with a hand-rolled -update flag, UI tests on `node --test` + jsdom + mock.timers). All tests must pass under -race and `just check` must pass before merge. Do not edit files outside `owns` except to fix compile errors caused by your change.",
+    "blocked_by": [
+      "T19"
+    ],
+    "owns": [
+      "internal/config/on_blocked.go",
+      "internal/config/on_blocked_test.go",
+      "internal/config/workflows.go",
+      "internal/controlplane/on_blocked.go",
+      "internal/controlplane/on_blocked_test.go",
+      "internal/controlplane/workflows.go"
+    ],
+    "acceptance": [
+      "go test -race ./internal/config ./internal/controlplane -run 'TestOnBlockedGoto|TestOnBlockedMax' -> PASS",
+      "just check -> exit 0"
+    ]
+  }
+]
