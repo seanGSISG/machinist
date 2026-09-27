@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/owainlewis/machinist/internal/protocol"
@@ -37,10 +38,6 @@ type ExecutorAuthStatus struct {
 	Online       bool          `json:"online"`
 }
 
-func validAuthState(state string) bool {
-	return slices.Contains([]string{protocol.AuthConnected, protocol.AuthExpiring, protocol.AuthExpired, protocol.AuthUnknown}, state)
-}
-
 // RecordExecutorAuth replaces the auth states a worker instance reported.
 func (s *Store) RecordExecutorAuth(ctx context.Context, request protocol.AuthSyncRequest) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -48,20 +45,45 @@ func (s *Store) RecordExecutorAuth(ctx context.Context, request protocol.AuthSyn
 		return err
 	}
 	defer tx.Rollback()
-	now := s.now().UTC().Format(time.RFC3339Nano)
+	nowTime := s.now().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
 	// Register the instance without touching last_seen_at: only run polls and
 	// heartbeats decide whether a worker is available for work.
 	if _, err := tx.ExecContext(ctx, `INSERT INTO workers(instance_id,name,last_seen_at) VALUES(?,?,?) ON CONFLICT(instance_id) DO UPDATE SET name=excluded.name`, request.InstanceID, request.Name, now); err != nil {
 		return fmt.Errorf("register worker: %w", err)
+	}
+	previous, err := previousExecutorAuth(ctx, tx, request.InstanceID)
+	if err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM worker_executor_auth WHERE worker_instance=?`, request.InstanceID); err != nil {
 		return fmt.Errorf("clear executor auth: %w", err)
 	}
 	for _, executor := range slices.Sorted(maps.Keys(request.Executors)) {
 		report := request.Executors[executor]
-		state := report.State
-		if !validAuthState(state) {
-			state = protocol.AuthUnknown
+		prior := previous[executor]
+		priorState := prior.state
+		fsm := authFSMForStoredState(priorState)
+		before := fsm.state
+		after := before
+		state := priorState
+		if !sameAuthCheck(prior.checkedAt, report.CheckedAt) {
+			result := authCheckResult(report)
+			// A worker's first expired observation is authoritative. Hysteresis is
+			// useful only when there is a previously healthy login to preserve.
+			if priorState == "" && report.State == protocol.AuthExpired {
+				result.LoggedOut = true
+			}
+			after, _ = fsm.Observe(result, nowTime)
+			state = storedAuthState(after, report.State)
+		}
+		if before != after {
+			if err := s.AppendEvent(ctx, tx, Event{
+				Type: "auth_change", SubjectKind: "executor", SubjectID: request.Name + "/" + executor,
+				Cause: "auth_check", Payload: map[string]string{"from": before, "to": after}, CreatedAt: nowTime,
+			}); err != nil {
+				return err
+			}
 		}
 		detail := truncateUTF8(report.Detail, maxAuthDetailBytes)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO worker_executor_auth(worker_instance,executor,login,login_timeout_ms,state,detail,checked_at,expires_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
@@ -70,6 +92,72 @@ func (s *Store) RecordExecutorAuth(ctx context.Context, request protocol.AuthSyn
 		}
 	}
 	return tx.Commit()
+}
+
+type storedExecutorAuth struct {
+	state     string
+	checkedAt *time.Time
+}
+
+func previousExecutorAuth(ctx context.Context, tx *sql.Tx, instanceID string) (map[string]storedExecutorAuth, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT executor,state,COALESCE(checked_at,'') FROM worker_executor_auth WHERE worker_instance=?`, instanceID)
+	if err != nil {
+		return nil, fmt.Errorf("read previous executor auth: %w", err)
+	}
+	defer rows.Close()
+	states := map[string]storedExecutorAuth{}
+	for rows.Next() {
+		var executor, state, checkedAt string
+		if err := rows.Scan(&executor, &state, &checkedAt); err != nil {
+			return nil, err
+		}
+		states[executor] = storedExecutorAuth{state: state, checkedAt: parseOptionalTime(checkedAt)}
+	}
+	return states, rows.Err()
+}
+
+func sameAuthCheck(previous, current *time.Time) bool {
+	return previous != nil && current != nil && previous.Equal(*current)
+}
+
+func authFSMForStoredState(state string) authFSM {
+	switch state {
+	case protocol.AuthExpired:
+		return authFSM{state: authStateExpired, softFailures: 2}
+	case protocol.AuthUnknown:
+		return authFSM{state: authStateRechecking, softFailures: 1}
+	default:
+		return authFSM{state: authStateOK}
+	}
+}
+
+func authCheckResult(report protocol.ExecutorAuthReport) CheckResult {
+	result := CheckResult{ExpiresAt: report.ExpiresAt}
+	switch report.State {
+	case protocol.AuthConnected, protocol.AuthExpiring:
+		result.Success = true
+	}
+	detail := strings.ToLower(report.Detail)
+	if strings.Contains(detail, "401") {
+		result.StatusCode = 401
+	}
+	result.LoggedOut = strings.Contains(detail, "logged out") || strings.Contains(detail, "logout") ||
+		strings.Contains(detail, "not logged in") || strings.Contains(detail, "did not report a login")
+	return result
+}
+
+func storedAuthState(state, reported string) string {
+	switch state {
+	case authStateOK:
+		if reported == protocol.AuthExpiring {
+			return protocol.AuthExpiring
+		}
+		return protocol.AuthConnected
+	case authStateExpired:
+		return protocol.AuthExpired
+	default:
+		return protocol.AuthUnknown
+	}
 }
 
 // ExecutorAuthStatuses lists the latest auth state per worker name and
