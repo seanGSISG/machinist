@@ -3,6 +3,7 @@ package managedworker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/owainlewis/machinist/internal/config"
@@ -303,8 +305,8 @@ func TestManagedWorkerPollsAgainAfterCompletionConflict(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("worker returned error: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "machinist: report run run-test: control plane returned HTTP 409 Conflict") {
-		t.Fatalf("completion conflict was not logged: %q", stderr.String())
+	if stderr.String() != "" {
+		t.Fatalf("completion conflict produced failure output: %q", stderr.String())
 	}
 }
 
@@ -524,4 +526,87 @@ func TestWorkflowStopsProcessAfterLeaseRejection(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("workflow kept executing after definitive lease rejection")
 	}
+}
+
+func TestWorkerTerminalOn404(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var polls atomic.Int32
+		var heartbeats atomic.Int32
+		var completions atomic.Int32
+		transport := roundTripFunc(func(request *http.Request) *http.Response {
+			status := http.StatusOK
+			body := ""
+			switch request.URL.Path {
+			case "/api/v1/workers/poll":
+				poll := polls.Add(1)
+				if poll <= 2 {
+					body = fmt.Sprintf(`{"run":{"id":"run-%d","lease_token":"lease-%d"}}`, poll, poll)
+				} else {
+					body = `{}`
+				}
+			case "/api/v1/runs/run-1/heartbeat":
+				heartbeats.Add(1)
+				status = http.StatusNotFound
+			case "/api/v1/runs/run-2/heartbeat":
+				heartbeats.Add(1)
+				status = http.StatusConflict
+			case "/api/v1/runs/run-1/complete", "/api/v1/runs/run-2/complete":
+				completions.Add(1)
+				status = http.StatusNoContent
+			default:
+				status = http.StatusNotFound
+			}
+			return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}
+		})
+		ticks := make(chan time.Time)
+		started := make(chan string, 2)
+		stopped := make(chan string, 2)
+		worker := &Worker{
+			config:         config.Worker{ControlPlane: config.ControlPlane{URL: "http://control-plane.test"}},
+			instanceID:     "worker-test",
+			client:         newClient("http://control-plane.test", "secret", &http.Client{Transport: transport}),
+			stderr:         io.Discard,
+			heartbeatTicks: ticks,
+			executeRun: func(ctx context.Context, spec protocol.RunSpec) protocol.Completion {
+				started <- spec.ID
+				<-ctx.Done()
+				stopped <- spec.ID
+				return protocol.Completion{State: "cancelled", ExitCode: 130}
+			},
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { done <- worker.Run(ctx) }()
+
+		if got := <-started; got != "run-1" {
+			t.Fatalf("first run = %q", got)
+		}
+		ticks <- time.Now()
+		if got := <-stopped; got != "run-1" {
+			t.Fatalf("first stopped run = %q", got)
+		}
+		if got := <-started; got != "run-2" {
+			t.Fatalf("second run = %q", got)
+		}
+		ticks <- time.Now()
+		if got := <-stopped; got != "run-2" {
+			t.Fatalf("second stopped run = %q", got)
+		}
+		cancel()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		if got := heartbeats.Load(); got != 2 {
+			t.Fatalf("heartbeats = %d, want 2", got)
+		}
+		if got := completions.Load(); got != 0 {
+			t.Fatalf("completion requests = %d, want 0", got)
+		}
+	})
+}
+
+type roundTripFunc func(*http.Request) *http.Response
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request), nil
 }
