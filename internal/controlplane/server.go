@@ -71,6 +71,7 @@ type submitRequest struct {
 type commandDefinitionResponse struct {
 	Name     string `json:"name"`
 	Executor string `json:"executor"`
+	Model    string `json:"model,omitempty"`
 	Timeout  string `json:"timeout"`
 	Hash     string `json:"hash"`
 	Prompt   string `json:"prompt"`
@@ -283,6 +284,10 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/jobs/{id}/{action}", s.authorizeSubmission(s.workflowAction))
 	mux.HandleFunc("POST /api/v1/jobs", s.authorizeSubmission(s.submit))
 	mux.HandleFunc("DELETE /api/v1/jobs/{id}", s.authorizeSubmission(s.deleteJob))
+	mux.HandleFunc("GET /api/v1/settings", s.settings)
+	mux.HandleFunc("GET /api/v1/settings/{kind}/{name}/history", s.settingHistory)
+	mux.HandleFunc("PUT /api/v1/settings/{kind}/{name}", s.authorizeSubmission(s.putSetting))
+	mux.HandleFunc("POST /api/v1/settings/versions/{id}/revert", s.authorizeSubmission(s.revertSetting))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
@@ -292,7 +297,7 @@ func (s *Server) routes() (http.Handler, error) {
 
 func (s *Server) definitions(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
-	definition, err := config.LoadDefinitions(s.definitionPath)
+	definition, _, err := s.loadDefinitions(request.Context())
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return
@@ -304,7 +309,7 @@ func (s *Server) definitions(response http.ResponseWriter, request *http.Request
 			writeError(response, http.StatusInternalServerError, err)
 			return
 		}
-		commands = append(commands, commandDefinitionResponse{Name: command.Name, Executor: command.Executor, Timeout: command.Timeout.String(), Hash: command.Hash, Prompt: command.Prompt})
+		commands = append(commands, commandDefinitionResponse{Name: command.Name, Executor: command.Executor, Model: definition.DefaultModel(name), Timeout: command.Timeout.String(), Hash: command.Hash, Prompt: command.Prompt})
 	}
 	workflows := map[string][]workflowStepDefinition{}
 	for _, name := range definition.WorkflowNames() {
@@ -330,7 +335,7 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
-	definition, err := config.LoadDefinitions(s.definitionPath)
+	definition, _, err := s.loadDefinitions(request.Context())
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return
@@ -354,7 +359,7 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) catalog(response http.ResponseWriter, request *http.Request) {
-	definition, err := config.LoadDefinitions(s.definitionPath)
+	definition, _, err := s.loadDefinitions(request.Context())
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return
@@ -404,7 +409,7 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 			writeError(response, http.StatusBadRequest, errors.New("choose either workflow or command"))
 			return
 		}
-		definition, err := config.LoadDefinitions(s.definitionPath)
+		definition, _, err := s.loadDefinitions(request.Context())
 		if err != nil {
 			writeError(response, http.StatusBadRequest, err)
 			return
@@ -443,7 +448,12 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, errors.New("command is required"))
 		return
 	}
-	command, err := config.LoadCommand(s.definitionPath, input.Command)
+	definition, _, err := s.loadDefinitions(request.Context())
+	if err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	command, err := definition.ResolveCommand(input.Command)
 	if err != nil {
 		writeError(response, http.StatusBadRequest, err)
 		return
@@ -454,6 +464,9 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	command.Model = input.Model
+	if command.Model == "" {
+		command.Model = definition.DefaultModel(input.Command)
+	}
 	jobID, err := s.store.CreateJob(request.Context(), input.Prompt, input.Repository, input.Command, command)
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
