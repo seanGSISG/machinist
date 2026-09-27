@@ -23,12 +23,16 @@ const (
 	maxLoginURL         = 4 << 10
 	maxLoginCode        = 64
 	maxLoginInput       = 4 << 10
+	// maxQueuedInputs bounds the input waiting for one session's next worker
+	// sync, so a client cannot grow control plane memory or the sync response.
+	maxQueuedInputs = 16
 )
 
 var (
 	ErrLoginNotFound = errors.New("login session not found")
 	ErrLoginActive   = errors.New("a login is already in progress for this executor")
 	ErrLoginEnded    = errors.New("login session has ended")
+	ErrLoginBusy     = errors.New("too much input is waiting for the worker; try again in a moment")
 )
 
 // loginBroker relays login sessions between the web UI and workers. It keeps
@@ -170,6 +174,15 @@ func (b *loginBroker) input(id, token, text, key string) error {
 	} else if len(text) > maxLoginInput || strings.ContainsAny(text, "\x00\r\n\x1b") {
 		return errors.New("input must be one line of at most 4 KiB")
 	}
+	queued := 0
+	for _, action := range b.pending[session.instance] {
+		if action.SessionID == id && action.Kind == protocol.LoginActionInput {
+			queued++
+		}
+	}
+	if queued >= maxQueuedInputs {
+		return ErrLoginBusy
+	}
 	session.awaiting = false
 	if session.state == protocol.LoginAwaiting {
 		session.state = protocol.LoginRunning
@@ -300,7 +313,9 @@ func (b *loginBroker) expireLocked() {
 			b.endLocked(session, protocol.LoginTimedOut, "")
 			b.pending[session.instance] = append(b.pending[session.instance], protocol.LoginAction{SessionID: id, Kind: protocol.LoginActionCancel, Executor: session.executor})
 		case session.state != protocol.LoginPending && now.Sub(session.lastReport) > loginWorkerSilence:
+			// The worker may only be disconnected: stop its terminal if it comes back.
 			b.endLocked(session, protocol.LoginFailed, "the worker stopped responding")
+			b.pending[session.instance] = append(b.pending[session.instance], protocol.LoginAction{SessionID: id, Kind: protocol.LoginActionCancel, Executor: session.executor})
 		}
 	}
 }

@@ -124,6 +124,8 @@ func (s *Server) loginInput(response http.ResponseWriter, request *http.Request)
 		writeError(response, http.StatusNotFound, err)
 	case errors.Is(err, ErrLoginEnded):
 		writeError(response, http.StatusConflict, err)
+	case errors.Is(err, ErrLoginBusy):
+		writeError(response, http.StatusTooManyRequests, err)
 	case err != nil:
 		writeError(response, http.StatusBadRequest, err)
 	default:

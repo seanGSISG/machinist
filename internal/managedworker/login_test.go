@@ -225,3 +225,38 @@ func TestStopAfterTheLoginEndedSignalsNothing(t *testing.T) {
 		t.Fatalf("finished session changed: %q %q", session.state, session.reason)
 	}
 }
+
+// A login that ends while a status check is running must not lose its
+// re-check: the running check may have seen the old credentials.
+func TestLoginEndDuringAStatusCheckRechecksAfterIt(t *testing.T) {
+	bin := t.TempDir()
+	release := filepath.Join(t.TempDir(), "release")
+	writeFakeCLI(t, bin, "fake-status", "#!/bin/sh\nwhile [ ! -f "+release+" ]; do sleep 0.05; done\nexit 1\n")
+	recipe := fakeRecipe(t, bin)
+	agent := &authAgent{
+		recipes: map[string]config.AuthRecipe{"fake": recipe}, environment: testLoginEnvironment(t), now: time.Now,
+		statuses: map[string]protocol.ExecutorAuthReport{}, nextCheck: map[string]time.Time{}, checking: map[string]bool{},
+		recheck: map[string]bool{}, sessions: map[string]*loginSession{}, wake: make(chan struct{}, 1),
+	}
+	agent.startDueChecks(context.Background())
+	agent.recheckAll()
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		agent.mu.Lock()
+		checking, next := agent.checking["fake"], agent.nextCheck["fake"]
+		agent.mu.Unlock()
+		if !checking && !next.IsZero() {
+			t.Fatalf("the in-flight check scheduled the next one at %v, dropping the login re-check", next)
+		}
+		if !checking {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("status check never finished")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

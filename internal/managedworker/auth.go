@@ -46,6 +46,7 @@ type authAgent struct {
 	statuses  map[string]protocol.ExecutorAuthReport
 	nextCheck map[string]time.Time
 	checking  map[string]bool
+	recheck   map[string]bool
 	sessions  map[string]*loginSession
 	wake      chan struct{}
 	lastError string
@@ -64,7 +65,7 @@ func newAuthAgent(workerConfig config.Worker, client *Client, instanceID string,
 		client: client, instanceID: instanceID, name: workerConfig.Name, recipes: recipes,
 		environment: environment, stderr: stderr, now: time.Now,
 		statuses: map[string]protocol.ExecutorAuthReport{}, nextCheck: map[string]time.Time{},
-		checking: map[string]bool{}, sessions: map[string]*loginSession{}, wake: make(chan struct{}, 1),
+		checking: map[string]bool{}, recheck: map[string]bool{}, sessions: map[string]*loginSession{}, wake: make(chan struct{}, 1),
 	}
 	for name, recipe := range recipes {
 		agent.statuses[name] = protocol.ExecutorAuthReport{Login: len(recipe.Login) > 0, LoginTimeout: recipe.Timeout.Milliseconds(), State: protocol.AuthUnknown}
@@ -256,15 +257,25 @@ func (a *authAgent) start(ctx context.Context, action protocol.LoginAction) {
 		state := session.state
 		session.mu.Unlock()
 		fmt.Fprintf(a.stderr, "machinist: login %s for %s: %s\n", session.id, session.executor, state)
-		// Re-check right away so the new credentials show up. Check every
-		// executor: several can share one CLI login (claude and claude-opus).
-		a.mu.Lock()
-		for name := range a.recipes {
+		a.recheckAll()
+	}()
+	a.notify()
+}
+
+// recheckAll schedules every status check right away, so new credentials
+// show up. It checks every executor: several can share one CLI login (claude
+// and claude-opus). A check already running when the login ended may have
+// seen the old credentials, so it is re-run when it finishes.
+func (a *authAgent) recheckAll() {
+	a.mu.Lock()
+	for name := range a.recipes {
+		if a.checking[name] {
+			a.recheck[name] = true
+		} else {
 			a.nextCheck[name] = time.Time{}
 		}
-		a.mu.Unlock()
-		a.notify()
-	}()
+	}
+	a.mu.Unlock()
 	a.notify()
 }
 
@@ -308,6 +319,10 @@ func (a *authAgent) startDueChecks(ctx context.Context) {
 			a.statuses[name] = status
 			a.checking[name] = false
 			a.nextCheck[name] = a.now().Add(recipe.StatusInterval)
+			if a.recheck[name] {
+				delete(a.recheck, name)
+				a.nextCheck[name] = time.Time{}
+			}
 			a.mu.Unlock()
 			a.notify()
 		}()

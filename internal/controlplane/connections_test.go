@@ -181,6 +181,27 @@ func TestLoginIsBoundToOneWorkerInstance(t *testing.T) {
 	}
 }
 
+func TestLoginInputQueueIsBounded(t *testing.T) {
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	broker := newLoginBroker(func() time.Time { return now })
+	view, token, _ := broker.start("colo", "worker-a", "claude", time.Minute, false)
+	broker.sync("worker-a", nil, nil)
+	for range maxQueuedInputs {
+		if err := broker.input(view.ID, token, strings.Repeat("x", maxLoginInput), ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := broker.input(view.ID, token, "one more", ""); err != ErrLoginBusy {
+		t.Fatalf("input past the queue limit = %v", err)
+	}
+	if actions := broker.sync("worker-a", nil, []string{view.ID}); len(actions) != maxQueuedInputs {
+		t.Fatalf("queued input = %d", len(actions))
+	}
+	if err := broker.input(view.ID, token, "after sync", ""); err != nil {
+		t.Fatalf("input after the worker drained the queue = %v", err)
+	}
+}
+
 func TestTruncateUTF8KeepsWholeRunes(t *testing.T) {
 	if got := truncateUTF8("abé", 3); got != "ab" {
 		t.Fatalf("truncateUTF8 = %q", got)
@@ -211,6 +232,10 @@ func TestLoginBrokerExpiresAndSanitizesSessions(t *testing.T) {
 	now = now.Add(loginWorkerSilence + time.Second)
 	if view, _ = broker.get(view.ID, token); view.State != protocol.LoginFailed || !strings.Contains(view.Error, "stopped responding") {
 		t.Fatalf("silent worker session = %+v", view)
+	}
+	silent := view.ID
+	if actions := broker.sync("worker-a", nil, nil); len(actions) != 1 || actions[0].SessionID != silent || actions[0].Kind != protocol.LoginActionCancel {
+		t.Fatalf("a worker that comes back must cancel the failed login: %+v", actions)
 	}
 
 	view, token, _ = broker.start("colo", "worker-a", "claude", time.Minute, false)

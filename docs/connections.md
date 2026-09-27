@@ -117,9 +117,10 @@ still works for them.
 4. The page shows **Open login page**, the code, and a paste box. Text sent
    from the box is typed into the terminal followed by Enter. Enter, arrow,
    Tab and Esc buttons drive provider pickers.
-5. The session ends when the CLI exits (0 = succeeded), on Cancel, or on
-   timeout; the worker kills the process group in the last two cases, then
-   re-runs `status`.
+5. The session ends when the CLI exits (0 = succeeded), on Cancel, on
+   timeout, or when the worker stops syncing for 30 seconds; the worker kills
+   the process group in the last three cases (on its next sync, if it was
+   only disconnected), then re-runs `status` for every executor.
 
 ## Security
 
@@ -133,7 +134,8 @@ still works for them.
   cancels the old session.
 - Login sessions live only in control plane memory. Links, device codes and
   pasted input are never written to the database or logs. Pasted input is
-  held until the worker's next sync, then dropped. Finished sessions are
+  held until the worker's next sync, then dropped; at most 16 inputs wait per
+  session (more get HTTP 429). Finished sessions are
   forgotten after 10 minutes, and a restart ends them all.
 - The worker never runs an argument from the control plane. A start for an
   executor without a `login` recipe fails on the worker.
