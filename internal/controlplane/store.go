@@ -245,7 +245,7 @@ CREATE INDEX IF NOT EXISTS github_trigger_requests_reconciliation ON github_trig
 			return fmt.Errorf("upgrade workflow schema: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+settingsSchema+"PRAGMA user_version=5;")
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+settingsSchema+authSchema+"PRAGMA user_version=5;")
 	return err
 }
 
@@ -828,6 +828,13 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	}
 
 	executors := stringSet(request.Executors)
+	expired, err := expiredExecutors(ctx, tx, request.InstanceID)
+	if err != nil {
+		return nil, err
+	}
+	for executor := range expired {
+		delete(executors, executor)
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT r.id,r.job_id,r.command,r.command_hash,r.executor,r.model,r.repository,r.rendered_prompt,r.timeout_ms,j.state,COALESCE((SELECT plan FROM workflow_jobs WHERE job_id=j.id),'') FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.state='queued' AND (NOT EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=j.id) OR (? AND EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=j.id AND (w.worker_name='' OR w.worker_name=?)))) AND (? OR NOT EXISTS(SELECT 1 FROM task_inputs t WHERE t.job_id=j.id)) AND (? OR NOT EXISTS(SELECT 1 FROM execution_reviews er WHERE er.run_id=r.id)) ORDER BY r.rowid`, request.Workflows, request.Name, request.Artifacts, request.Reviews)
 	if err != nil {
 		return nil, err

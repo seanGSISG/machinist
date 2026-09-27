@@ -46,15 +46,17 @@ type Server struct {
 	maxConcurrentJobs int
 	workerToken       string
 	csrfToken         string
+	logins            *loginBroker
 	handler           http.Handler
 }
 
 type statusResponse struct {
 	Workflows []string `json:"workflows"`
 	Snapshot
-	Commands     []string `json:"commands"`
-	Repositories []string `json:"repositories"`
-	CSRFToken    string   `json:"csrf_token"`
+	Commands     []string             `json:"commands"`
+	Repositories []string             `json:"repositories"`
+	Connections  []ExecutorAuthStatus `json:"connections"`
+	CSRFToken    string               `json:"csrf_token"`
 }
 
 type submitRequest struct {
@@ -134,6 +136,7 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
 		maxConcurrentJobs: maxConcurrentJobs, workerToken: workerToken, csrfToken: csrfToken,
 	}
+	server.logins = newLoginBroker(func() time.Time { return server.store.now() })
 	server.handler, err = server.routes()
 	if err != nil {
 		return nil, err
@@ -288,6 +291,12 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("GET /api/v1/settings/{kind}/{name}/history", s.settingHistory)
 	mux.HandleFunc("PUT /api/v1/settings/{kind}/{name}", s.authorizeSubmission(s.putSetting))
 	mux.HandleFunc("POST /api/v1/settings/versions/{id}/revert", s.authorizeSubmission(s.revertSetting))
+	mux.HandleFunc("GET /api/v1/connections", s.connections)
+	mux.HandleFunc("POST /api/v1/connections/{worker}/{executor}/login", s.authorizeSubmission(s.startLogin))
+	mux.HandleFunc("GET /api/v1/connections/sessions/{id}", s.loginSession)
+	mux.HandleFunc("POST /api/v1/connections/sessions/{id}/input", s.authorizeSubmission(s.loginInput))
+	mux.HandleFunc("POST /api/v1/connections/sessions/{id}/cancel", s.authorizeSubmission(s.cancelLogin))
+	mux.HandleFunc("POST /api/v1/workers/auth", s.authorizeWorker(s.authSync))
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
@@ -349,8 +358,14 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, repositoryErr)
 		return
 	}
+	connections, err := s.store.ExecutorAuthStatuses(request.Context(), now.Add(-workerAvailabilityWindow))
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(response, http.StatusOK, statusResponse{
 		Snapshot:     snapshot,
+		Connections:  connections,
 		Commands:     definition.CommandNames(),
 		Workflows:    definition.WorkflowNames(),
 		Repositories: repositories,
