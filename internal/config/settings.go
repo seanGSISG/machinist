@@ -106,6 +106,9 @@ func (c Config) DefaultModel(commandName string) string {
 	return c.executorModels[command.Executor]
 }
 
+// ExecutorDefaultModel returns the stored default model for an executor.
+func (c Config) ExecutorDefaultModel(executor string) string { return c.executorModels[executor] }
+
 // WithSettings applies stored settings over the file configuration. Each
 // setting is applied only when it does not make a command or workflow fail to
 // resolve; rejected settings are returned as problems and the file value stays
