@@ -3,10 +3,14 @@ package managedworker
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // LoadOrCreateInstanceID returns the stable UUID for a worker state directory.
@@ -81,4 +85,57 @@ func parseInstanceID(value []byte) (string, error) {
 		return "", fmt.Errorf("worker instance ID %q is not a UUIDv4", id)
 	}
 	return id, nil
+}
+
+// nextIncarnation returns a value greater than every incarnation previously
+// created in this worker state directory. Retaining the high-water mark keeps
+// process identity monotonic even if the system clock moves backwards.
+func nextIncarnation(stateDir string) (int64, error) {
+	path := filepath.Join(stateDir, "incarnation")
+	var previous int64
+	if value, err := os.ReadFile(path); err == nil {
+		previous, err = strconv.ParseInt(strings.TrimSpace(string(value)), 10, 64)
+		if err != nil || previous <= 0 {
+			return 0, fmt.Errorf("read worker incarnation: invalid value %q", strings.TrimSpace(string(value)))
+		}
+	} else if !os.IsNotExist(err) {
+		return 0, fmt.Errorf("read worker incarnation: %w", err)
+	}
+
+	incarnation := time.Now().UnixNano()
+	if incarnation <= previous {
+		if previous == math.MaxInt64 {
+			return 0, errors.New("worker incarnation exhausted")
+		}
+		incarnation = previous + 1
+	}
+	if incarnation <= 0 {
+		incarnation = 1
+	}
+
+	temporary, err := os.CreateTemp(stateDir, ".incarnation-*")
+	if err != nil {
+		return 0, fmt.Errorf("create worker incarnation: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return 0, fmt.Errorf("secure worker incarnation: %w", err)
+	}
+	if _, err := fmt.Fprintf(temporary, "%d\n", incarnation); err != nil {
+		temporary.Close()
+		return 0, fmt.Errorf("write worker incarnation: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return 0, fmt.Errorf("sync worker incarnation: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return 0, fmt.Errorf("close worker incarnation: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return 0, fmt.Errorf("persist worker incarnation: %w", err)
+	}
+	return incarnation, nil
 }

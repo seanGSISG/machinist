@@ -33,4 +33,15 @@ func TestInstanceIDPersists(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("instance ID mode = %o, want 600", info.Mode().Perm())
 	}
+	firstIncarnation, err := nextIncarnation(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondIncarnation, err := nextIncarnation(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondIncarnation <= firstIncarnation {
+		t.Fatalf("second incarnation = %d, want greater than %d", secondIncarnation, firstIncarnation)
+	}
 }

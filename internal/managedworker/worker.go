@@ -47,9 +47,9 @@ func New(workerConfig config.Worker, stdout, stderr io.Writer) (*Worker, error) 
 	if err != nil {
 		return nil, err
 	}
-	incarnation := time.Now().UnixNano()
-	if incarnation <= 0 {
-		incarnation = 1
+	incarnation, err := nextIncarnation(workerConfig.DataDirectory)
+	if err != nil {
+		return nil, err
 	}
 	auth, err := newAuthAgent(workerConfig, client, instanceID, stderr)
 	if err != nil {

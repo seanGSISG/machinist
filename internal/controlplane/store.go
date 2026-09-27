@@ -829,7 +829,7 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	if err := recordWorkerExecutors(ctx, tx, request); err != nil {
 		return nil, err
 	}
-	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,lease_token,incarnation FROM runs WHERE worker_instance=? AND state='running' AND incarnation=? LIMIT 1`, request.InstanceID, incarnation))
+	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,lease_token,COALESCE(incarnation,0) FROM runs WHERE worker_instance=? AND state='running' AND COALESCE(incarnation,0)=? LIMIT 1`, request.InstanceID, incarnation))
 	if err == nil {
 		var activeWorkflow bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workflow_jobs WHERE job_id=?)`, active.JobID).Scan(&activeWorkflow); err != nil {
