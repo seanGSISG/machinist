@@ -70,5 +70,5 @@ docs/                         user and design documentation
 ```
 
 The frontend source lives in `internal/controlplane/web/src`. Its production
-bundle lives in `internal/controlplane/web/dist` because Go embeds those files at
-compile time.
+bundle is built into `internal/controlplane/web/dist` (untracked; `just frontend`)
+because Go embeds those files at compile time.

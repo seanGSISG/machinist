@@ -31,7 +31,9 @@ const maxRequestBytes = 1 << 20
 
 const workerAvailabilityWindow = 15 * time.Second
 
-//go:embed web/dist/* web/dist/assets/*
+// The bundle is built, not committed (`just frontend`); .gitkeep lets a Go-only build compile.
+//
+//go:embed all:web/dist
 var webAssets embed.FS
 
 type Server struct {
@@ -301,7 +303,13 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
-	mux.Handle("/", http.FileServer(http.FS(dist)))
+	if _, err := fs.Stat(dist, "index.html"); err != nil {
+		mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "web UI not built: run `just frontend`, then rebuild machinist", http.StatusServiceUnavailable)
+		})
+	} else {
+		mux.Handle("/", http.FileServer(http.FS(dist)))
+	}
 	return securityHeaders(mux), nil
 }
 

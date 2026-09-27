@@ -5,5 +5,5 @@
 __pycache__/
 *.py[cod]
 internal/controlplane/web/node_modules/
-!internal/controlplane/web/dist/
-!internal/controlplane/web/dist/**
+internal/controlplane/web/dist/*
+!internal/controlplane/web/dist/.gitkeep

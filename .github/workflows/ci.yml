@@ -40,10 +40,6 @@ jobs:
       - name: Build frontend
         working-directory: internal/controlplane/web
         run: npm run build
-      - name: Check tracked frontend is current
-        run: |
-          git diff --exit-code -- internal/controlplane/web/dist
-          test -z "$(git status --porcelain --untracked-files=all -- internal/controlplane/web/dist)"
       - name: Check Go formatting
         shell: bash
         run: |
