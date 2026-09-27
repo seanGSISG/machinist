@@ -63,14 +63,16 @@ type statusResponse struct {
 }
 
 type submitRequest struct {
-	Title      string `json:"title"`
-	SourceURL  string `json:"source_url"`
-	Spec       string `json:"spec"`
-	Workflow   string `json:"workflow"`
-	Prompt     string `json:"prompt"`
-	Repository string `json:"repository"`
-	Command    string `json:"command"`
-	Model      string `json:"model"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	SupersedesJobID string            `json:"supersedes_job_id,omitempty"`
+	Title           string            `json:"title"`
+	SourceURL       string            `json:"source_url"`
+	Spec            string            `json:"spec"`
+	Workflow        string            `json:"workflow"`
+	Prompt          string            `json:"prompt"`
+	Repository      string            `json:"repository"`
+	Command         string            `json:"command"`
+	Model           string            `json:"model"`
 }
 
 type commandDefinitionResponse struct {
@@ -303,6 +305,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/v1/workers/poll", s.authorizeWorker(s.poll))
 	mux.HandleFunc("POST /api/v1/runs/{id}/heartbeat", s.authorizeWorker(s.heartbeat))
 	mux.HandleFunc("POST /api/v1/runs/{id}/complete", s.authorizeWorker(s.complete))
+	s.registerFAC06Routes(mux)
 	if _, err := fs.Stat(dist, "index.html"); err != nil {
 		mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 			http.Error(w, "web UI not built: run `just frontend`, then rebuild machinist", http.StatusServiceUnavailable)

@@ -1,12 +1,16 @@
 package protocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 type PollRequest struct {
 	SharedOutputs bool                `json:"shared_outputs,omitempty"`
 	Reviews       bool                `json:"reviews,omitempty"`
 	Artifacts     bool                `json:"artifacts,omitempty"`
 	Workflows     bool                `json:"workflows,omitempty"`
+	Incarnation   int64               `json:"incarnation,omitempty"`
 	InstanceID    string              `json:"instance_id"`
 	Name          string              `json:"name"`
 	Executors     []string            `json:"executors"`
@@ -25,6 +29,7 @@ type RunSpec struct {
 	RequiredOutputs []string            `json:"required_outputs,omitempty"`
 	ArtifactLimits  *ArtifactLimits     `json:"artifact_limits,omitempty"`
 	Workflow        bool                `json:"workflow,omitempty"`
+	Incarnation     int64               `json:"incarnation,omitempty"`
 	ID              string              `json:"id"`
 	JobID           string              `json:"job_id"`
 	Command         string              `json:"command"`
@@ -45,6 +50,10 @@ type Heartbeat struct {
 type Completion struct {
 	Artifacts        []string        `json:"artifacts,omitempty"`
 	PublicationError string          `json:"publication_error,omitempty"`
+	FailureClass     string          `json:"failure_class,omitempty"`
+	ResetAt          *time.Time      `json:"reset_at,omitempty"`
+	ResetSource      string          `json:"reset_source,omitempty"`
+	Usage            *Usage          `json:"usage,omitempty"`
 	InstanceID       string          `json:"instance_id"`
 	LeaseToken       string          `json:"lease_token"`
 	State            string          `json:"state"`
@@ -52,4 +61,18 @@ type Completion struct {
 	Error            string          `json:"error,omitempty"`
 	Result           json.RawMessage `json:"result,omitempty"`
 	Events           string          `json:"events,omitempty"`
+}
+
+type Usage struct {
+	Model             string `json:"model,omitempty"`
+	InputTokens       int64  `json:"input_tokens,omitempty"`
+	OutputTokens      int64  `json:"output_tokens,omitempty"`
+	CachedInputTokens int64  `json:"cached_input_tokens,omitempty"`
+	ReasoningTokens   int64  `json:"reasoning_tokens,omitempty"`
+}
+
+type LogChunk struct {
+	Offset    int64  `json:"offset,omitempty"`
+	Data      []byte `json:"data,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
 }

@@ -3,6 +3,8 @@ listen = "127.0.0.1:7331"
 database = "~/.machinist/server/machinist.db"
 worker_token_file = "~/.machinist/server/worker.token"
 # max_concurrent_jobs = 1
+# retention_days = 90
+# finished_limit = 50
 
 # Take a task or GitHub issue to a reviewed pull request.
 [commands.task-to-pr]

@@ -66,6 +66,8 @@ type Server struct {
 	Database          string `toml:"database"`
 	WorkerTokenFile   string `toml:"worker_token_file"`
 	MaxConcurrentJobs *int   `toml:"max_concurrent_jobs"`
+	RetentionDays     *int   `toml:"retention_days"`
+	FinishedLimit     *int   `toml:"finished_limit"`
 	// TrustedOrigins are extra browser origins (scheme://host[:port]) allowed to use the UI's
 	// mutating endpoints, for a reverse proxy that adds its own authentication. Loopback http
 	// origins are always accepted.
@@ -348,6 +350,20 @@ func (s Server) ConcurrentJobLimit() int {
 		return 0
 	}
 	return *s.MaxConcurrentJobs
+}
+
+func (s Server) RetentionDayLimit() int {
+	if s.RetentionDays == nil {
+		return 90
+	}
+	return *s.RetentionDays
+}
+
+func (s Server) FinishedJobLimit() int {
+	if s.FinishedLimit == nil {
+		return 50
+	}
+	return *s.FinishedLimit
 }
 
 func LoadCommand(definitionPath, name string) (ResolvedCommand, error) {

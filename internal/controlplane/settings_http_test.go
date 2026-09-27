@@ -259,7 +259,7 @@ func TestSettingsTablesKeepSchemaVersionForRollback(t *testing.T) {
 	if err := server.store.db.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 5 {
+	if version != 6 {
 		t.Fatalf("settings must stay additive so older releases can open the database; user_version = %d", version)
 	}
 }

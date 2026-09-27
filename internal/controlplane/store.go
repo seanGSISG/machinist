@@ -191,7 +191,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 5
+	const schemaVersion = 6
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -245,8 +245,59 @@ CREATE INDEX IF NOT EXISTS github_trigger_requests_reconciliation ON github_trig
 			return fmt.Errorf("upgrade workflow schema: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+settingsSchema+authSchema+"PRAGMA user_version=5;")
-	return err
+	if _, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+settingsSchema+authSchema); err != nil {
+		return err
+	}
+	if version < 6 {
+		if err := s.upgradeToVersionSix(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 6: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) upgradeToVersionSix(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, alteration := range []struct {
+		table  string
+		column string
+		sql    string
+	}{
+		{table: "jobs", column: "supersedes_job_id", sql: `ALTER TABLE jobs ADD COLUMN supersedes_job_id TEXT`},
+		{table: "runs", column: "failure_class", sql: `ALTER TABLE runs ADD COLUMN failure_class TEXT`},
+		{table: "runs", column: "reset_at", sql: `ALTER TABLE runs ADD COLUMN reset_at TEXT`},
+		{table: "runs", column: "reset_source", sql: `ALTER TABLE runs ADD COLUMN reset_source TEXT`},
+		{table: "runs", column: "incarnation", sql: `ALTER TABLE runs ADD COLUMN incarnation INTEGER`},
+		{table: "workers", column: "incarnation", sql: `ALTER TABLE workers ADD COLUMN incarnation INTEGER DEFAULT 0`},
+	} {
+		var present int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, alteration.table, alteration.column).Scan(&present); err != nil {
+			return err
+		}
+		if present == 0 {
+			if _, err := tx.ExecContext(ctx, alteration.sql); err != nil {
+				return err
+			}
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS job_labels (job_id TEXT, label_key TEXT, value TEXT, PRIMARY KEY(job_id,label_key));
+CREATE INDEX IF NOT EXISTS job_labels_key_value ON job_labels(label_key,value);
+CREATE TABLE IF NOT EXISTS executor_state (worker TEXT, executor TEXT, unavailable_until TEXT, backoff_seconds INTEGER, reset_source TEXT, updated_at TEXT, PRIMARY KEY(worker,executor));
+CREATE TABLE IF NOT EXISTS run_usage (run_id TEXT PRIMARY KEY, model TEXT, input_tokens INTEGER, output_tokens INTEGER, cached_input_tokens INTEGER, reasoning_tokens INTEGER, created_at TEXT);
+CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT, subject_kind TEXT, subject_id TEXT, cause TEXT, payload_json TEXT, created_at TEXT);
+CREATE INDEX IF NOT EXISTS events_type_created_at ON events(type,created_at);
+CREATE TABLE IF NOT EXISTS run_log_tail (run_id TEXT PRIMARY KEY, next_offset INTEGER, data BLOB, truncated INTEGER, updated_at TEXT);
+PRAGMA user_version=6;`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // upgradeToVersionTwo removes the Shepherd schedule bookkeeping. Finished jobs
