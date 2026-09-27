@@ -245,7 +245,7 @@ CREATE INDEX IF NOT EXISTS github_trigger_requests_reconciliation ON github_trig
 			return fmt.Errorf("upgrade workflow schema: %w", err)
 		}
 	}
-	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+"PRAGMA user_version=5;")
+	_, err := s.db.ExecContext(ctx, workflowSchema+artifactSchema+reviewSchema+settingsSchema+"PRAGMA user_version=5;")
 	return err
 }
 
@@ -767,6 +767,9 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 		if _, err := tx.ExecContext(ctx, `INSERT INTO worker_repositories(worker_instance,repository) VALUES(?,?)`, request.InstanceID, repository); err != nil {
 			return nil, fmt.Errorf("store worker repository: %w", err)
 		}
+	}
+	if err := recordWorkerExecutors(ctx, tx, request); err != nil {
+		return nil, err
 	}
 	active, err := scanRunSpec(tx.QueryRowContext(ctx, `SELECT id,job_id,command,command_hash,executor,model,repository,rendered_prompt,timeout_ms,lease_token FROM runs WHERE worker_instance=? AND state='running' LIMIT 1`, request.InstanceID))
 	if err == nil {
