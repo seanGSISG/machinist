@@ -181,16 +181,19 @@ func dropTriggersForInvalidCommands(definition *config.Config, invalid []config.
 	}
 	for name, trigger := range definition.Triggers.GitHub {
 		if invalidNames[trigger.Command] {
+			log.Printf("dropping trigger github/%s because command %q is invalid", name, trigger.Command)
 			delete(definition.Triggers.GitHub, name)
 		}
 	}
 	for name, trigger := range definition.Triggers.Interval {
 		if invalidNames[trigger.Command] {
+			log.Printf("dropping trigger interval/%s because command %q is invalid", name, trigger.Command)
 			delete(definition.Triggers.Interval, name)
 		}
 	}
 	for name, trigger := range definition.Triggers.Cron {
 		if invalidNames[trigger.Command] {
+			log.Printf("dropping trigger cron/%s because command %q is invalid", name, trigger.Command)
 			delete(definition.Triggers.Cron, name)
 		}
 	}
