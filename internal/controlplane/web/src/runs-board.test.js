@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { boardColumnForState, filterJobs, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, needsAttention } from "./runs-board.js";
+import { boardColumnForState, capFinished, finishedJobLimit, filterJobs, githubIssueReference, groupJobsByBoardColumn, jobDisplayTitle, needsAttention } from "./runs-board.js";
 
 test("job states map to the three board columns without hiding attention states", () => {
   assert.equal(boardColumnForState("queued"), "queued");
@@ -39,4 +39,14 @@ test("GitHub issue titles are preferred over prompts and hashes", () => {
   assert.equal(jobDisplayTitle(job), "Make cards readable");
   assert.equal(githubIssueReference(job), "#7");
   assert.equal(jobDisplayTitle({ id: "job_12345678", prompt: "Run an audit" }), "Run an audit");
+});
+
+test("the finished column is capped at the server limit and reports the overflow", () => {
+  const jobs = Array.from({ length: finishedJobLimit + 3 }, (_, index) => ({ id: `job_${index}`, state: "succeeded" }));
+  const capped = capFinished(jobs);
+  assert.equal(capped.shown.length, finishedJobLimit);
+  assert.equal(capped.hidden, 3);
+  assert.deepEqual(capFinished(jobs.slice(0, 2), 5), { shown: jobs.slice(0, 2), hidden: 0 });
+  assert.deepEqual(capFinished(jobs.slice(0, 4), 1).hidden, 3);
+  assert.equal(capFinished(jobs, undefined).shown.length, finishedJobLimit);
 });

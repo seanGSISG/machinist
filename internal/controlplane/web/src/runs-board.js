@@ -63,3 +63,12 @@ export function runProgress(runs) {
   const completeStates = new Set(["succeeded", "failed", "timed_out", "cancelled"]);
   return { completed: runs.filter((run) => completeStates.has(run.state)).length, total: runs.length };
 }
+
+// Mirrors the control plane's default server.finished_limit, which caps how
+// many finished jobs /status returns.
+export const finishedJobLimit = 50;
+
+export function capFinished(jobs, limit = finishedJobLimit) {
+  const cap = Number.isInteger(limit) && limit >= 0 ? limit : finishedJobLimit;
+  return { shown: jobs.slice(0, cap), hidden: Math.max(0, jobs.length - cap) };
+}

@@ -15,7 +15,8 @@ import { Card } from "@/components/ui/card";
 import { PageHeading } from "@/components/ui/page-heading";
 import { cn } from "@/lib/utils";
 import { routeFromHash } from "@/routes";
-import { boardColumns, currentRun, filterJobs, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
+import { boardColumns, capFinished, currentRun, filterJobs, groupJobsByBoardColumn, jobCounts, jobDisplayTitle } from "@/runs-board";
+import { groupJobs, visibleJobs } from "@/ticket-board";
 import { ConnectionsPage } from "@/connections.jsx";
 import { expiredConnections } from "@/connections";
 import { SettingsPage } from "@/settings.jsx";
@@ -42,6 +43,8 @@ function App() {
   const [composerOpen, setComposerOpen] = useState(false);
   const [filter, setFilter] = useState("all");
   const [runsView, setRunsView] = useState("board");
+  const [groupBy, setGroupBy] = useState("none");
+  const [showSuperseded, setShowSuperseded] = useState(false);
   const [dark, setDark] = useState(() => localStorage.getItem("machinist-theme") !== "light");
   const [route, setRoute] = useState(() => routeFromHash(window.location.hash));
   const view = route.view;
@@ -85,8 +88,10 @@ function App() {
 
   const repositories = status.repositories;
 
-  const counts = useMemo(() => jobCounts(status.jobs), [status.jobs]);
-  const visibleJobs = useMemo(() => filterJobs(status.jobs, filter), [filter, status.jobs]);
+  const shownJobs = useMemo(() => visibleJobs(status.jobs, { showSuperseded }), [showSuperseded, status.jobs]);
+  const counts = useMemo(() => jobCounts(shownJobs), [shownJobs]);
+  const filteredJobs = useMemo(() => filterJobs(shownJobs, filter), [filter, shownJobs]);
+  const jobGroups = useMemo(() => groupJobs(filteredJobs, groupBy), [filteredJobs, groupBy]);
 
   const connectedWorkers = status.workers.filter((worker) => worker.connected).length;
   const expired = useMemo(() => expiredConnections(status.connections), [status.connections]);
@@ -154,13 +159,13 @@ function App() {
   }
 
   return (
-    <div className="app-shell min-h-screen bg-background text-foreground md:flex">
+    <div className="app-shell min-h-dvh bg-background text-foreground md:flex">
       <aside className="app-sidebar sticky top-0 z-20 flex shrink-0 items-center border-b border-border bg-sidebar px-3 py-2 md:h-screen md:w-56 md:flex-col md:items-stretch md:border-b-0 md:border-r md:px-4 md:py-5">
         <div className="brand-lockup flex h-10 items-center gap-3 px-1">
           <MachinistMark />
           <span className="brand-wordmark">machinist</span>
         </div>
-        <nav className="ml-4 flex flex-1 gap-1 overflow-x-auto md:ml-0 md:mt-9 md:block md:overflow-visible" aria-label="Primary">
+        <nav className="ml-4 flex flex-1 gap-1 overflow-x-auto max-md:pb-[max(0.4rem,env(safe-area-inset-bottom))] md:ml-0 md:mt-9 md:block md:overflow-visible" aria-label="Primary">
           <a href="#/runs" aria-current={view === "runs" || view === "task" ? "page" : undefined} className={cn("nav-item", (view === "runs" || view === "task") && "nav-item-active")}><Activity className="size-4" /><span>Tasks</span><span className="ml-auto text-xs text-muted-foreground">{counts.all}</span></a>
           <a href="#/analytics" aria-current={view === "analytics" ? "page" : undefined} className={cn("nav-item", view === "analytics" && "nav-item-active")}><BarChart3 className="size-4" /><span>Analytics</span></a>
           <a href="#/usage" aria-current={view === "usage" ? "page" : undefined} className={cn("nav-item", view === "usage" && "nav-item-active")}><BarChart3 className="size-4" /><span>Usage</span></a>
@@ -201,6 +206,11 @@ function App() {
               </div>
               <div className="flex flex-wrap items-center justify-between gap-3 lg:justify-end">
                 <p className="text-xs text-muted-foreground">{counts.all} task{counts.all === 1 ? "" : "s"}</p>
+                <Button variant="ghost" size="sm" className={cn("h-7 px-2.5 text-xs!", showSuperseded && "bg-muted text-foreground")} aria-pressed={showSuperseded} onClick={() => setShowSuperseded((value) => !value)}>Show superseded</Button>
+                <div className="inline-flex items-center rounded-lg bg-muted/60 p-1" role="group" aria-label="Group runs">
+                  <span className="px-1.5 text-xs text-muted-foreground">Group</span>
+                  {[["none", "None"], ["ticket", "Ticket"]].map(([value, label]) => <Button key={value} variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", groupBy === value && "bg-surface text-foreground shadow-xs")} aria-pressed={groupBy === value} onClick={() => setGroupBy(value)}>{label}</Button>)}
+                </div>
                 <div className="inline-flex rounded-lg bg-muted/60 p-1" role="group" aria-label="Runs view">
                   <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", runsView === "board" && "bg-surface text-foreground shadow-xs")} aria-pressed={runsView === "board"} onClick={() => setRunsView("board")}><LayoutDashboard className="size-3.5" />Board</Button>
                   <Button variant="ghost" size="sm" className={cn("h-7 border-transparent px-2.5 text-xs!", runsView === "table" && "bg-surface text-foreground shadow-xs")} aria-pressed={runsView === "table"} onClick={() => setRunsView("table")}><Table2 className="size-3.5" />List</Button>
@@ -208,9 +218,12 @@ function App() {
               </div>
             </div>
 
-            {runsView === "board" ? <RunBoard jobs={visibleJobs} expired={expired} /> : <Card className="overflow-hidden">
-              {visibleJobs.length ? visibleJobs.map((job) => <RunRow key={job.id} job={job} />) : <EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} />}
-            </Card>}
+            {!jobGroups.length ? runsView === "board" ? <RunBoard jobs={[]} expired={expired} finishedLimit={status.finished_limit} /> : <Card className="overflow-hidden"><EmptyRuns filtered={filter !== "all"} openComposer={() => setComposerOpen(true)} /></Card> : <div className="space-y-6">
+              {jobGroups.map((group, index) => <section key={group.key} aria-label={group.label || undefined}>
+                {group.label && <h3 className="sticky top-0 z-10 -mx-1 mb-2 flex items-center justify-between gap-3 bg-background/95 px-1 py-2 text-sm font-semibold backdrop-blur max-md:top-14"><span className="min-w-0 truncate">{group.label}</span><span className="shrink-0 text-xs font-normal text-muted-foreground">{group.jobs.length} task{group.jobs.length === 1 ? "" : "s"}</span></h3>}
+                {runsView === "board" ? <RunBoard jobs={group.jobs} expired={index === 0 ? expired : []} finishedLimit={status.finished_limit} idPrefix={group.key} /> : <Card className="overflow-hidden">{group.jobs.map((job) => <RunRow key={job.id} job={job} />)}</Card>}
+              </section>)}
+            </div>}
           </section>
 
         </div>}
@@ -241,18 +254,22 @@ function RunComposer({ title,setTitle,sourceURL,setSourceURL,choices,repositorie
   </Card>;
 }
 
-function RunBoard({ jobs, expired }) {
+function RunBoard({ jobs, expired, finishedLimit, idPrefix = "all" }) {
   const groupedJobs = groupJobsByBoardColumn(jobs);
+  const finished = capFinished(groupedJobs.finished, finishedLimit);
+  const shownJobs = (column) => column === "finished" ? finished.shown : groupedJobs[column];
   const extra = (column) => column === "attention" ? expired.length : 0;
+  const headingID = (column) => `board-${idPrefix}-${column}`.replace(/[^\w-]/g, "_");
   return <div className="grid min-w-0 gap-4 md:grid-cols-2 xl:grid-cols-4">
-    {boardColumns.map((column) => <section key={column.id} className="run-column min-w-0 border border-border bg-muted/20" aria-labelledby={`board-${column.id}`}>
+    {boardColumns.map((column) => <section key={column.id} className="run-column min-w-0 border border-border bg-muted/20" aria-labelledby={headingID(column.id)}>
       <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
-        <div className="min-w-0"><h2 id={`board-${column.id}`} className="text-sm font-semibold">{column.title}</h2><p className="break-words text-xs text-muted-foreground">{column.description}</p></div>
+        <div className="min-w-0"><h2 id={headingID(column.id)} className="text-sm font-semibold">{column.title}</h2><p className="break-words text-xs text-muted-foreground">{column.description}</p></div>
         <Badge className="shrink-0 border-border bg-surface text-muted-foreground" aria-label={`${groupedJobs[column.id].length + extra(column.id)} visible ${column.title.toLowerCase()} items`}>{groupedJobs[column.id].length + extra(column.id)}</Badge>
       </header>
       <div className="grid min-w-0 gap-2 p-2">
         {column.id === "attention" && expired.map((connection) => <ConnectionCard key={`${connection.worker}/${connection.executor}`} connection={connection} />)}
-        {groupedJobs[column.id].length ? groupedJobs[column.id].map((job) => <RunCard key={job.id} job={job} />) : !extra(column.id) && <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
+        {groupedJobs[column.id].length ? shownJobs(column.id).map((job) => <RunCard key={job.id} job={job} />) : !extra(column.id) && <p className="px-2 py-8 text-center text-xs text-muted-foreground">No runs</p>}
+        {column.id === "finished" && finished.hidden > 0 && <p className="px-2 py-2 text-center text-xs text-muted-foreground">{finished.hidden} more</p>}
       </div>
     </section>)}
   </div>;
