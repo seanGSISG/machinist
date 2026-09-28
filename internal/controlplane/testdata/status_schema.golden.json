@@ -52,6 +52,7 @@
     "generated_at": "2026-09-27T12:00:00Z",
     "jobs": [
       {
+        "attention_reason": null,
         "command": "plan",
         "created_at": "2026-09-27T12:00:00Z",
         "id": "job_golden",
@@ -70,7 +71,8 @@
         ],
         "state": "running",
         "superseded": false,
-        "updated_at": "2026-09-27T12:00:00Z"
+        "updated_at": "2026-09-27T12:00:00Z",
+        "waiting_since": null
       }
     ],
     "logins": [],
