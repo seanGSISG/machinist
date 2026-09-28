@@ -55,6 +55,7 @@
         "command": "plan",
         "created_at": "2026-09-27T12:00:00Z",
         "id": "job_golden",
+        "labels": {},
         "repository": "machinist",
         "runs": [
           {
@@ -68,6 +69,7 @@
           }
         ],
         "state": "running",
+        "superseded": false,
         "updated_at": "2026-09-27T12:00:00Z"
       }
     ],

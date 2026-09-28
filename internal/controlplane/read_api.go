@@ -103,6 +103,10 @@ func (s *Server) listJobs(response http.ResponseWriter, request *http.Request) {
 			break
 		}
 	}
+	if err := s.store.enrichJobSummaries(request.Context(), summaries); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(response, http.StatusOK, jobsResponse{Jobs: summaries})
 }
 

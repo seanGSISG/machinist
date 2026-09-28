@@ -363,10 +363,15 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
+	jobs := cappedJobSummaries(snapshot.Jobs, definition.Server.FinishedJobLimit())
+	if err := s.store.enrichJobSummaries(request.Context(), jobs); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(response, http.StatusOK, StatusResponse{
 		SchemaVersion:         statusSchemaVersion,
 		GeneratedAt:           now,
-		Jobs:                  cappedJobSummaries(snapshot.Jobs, definition.Server.FinishedJobLimit()),
+		Jobs:                  jobs,
 		Workers:               snapshot.Workers,
 		Triggers:              snapshot.Triggers,
 		Connections:           connections,
@@ -407,6 +412,10 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 	var input submitRequest
 	if err := decodeJSON(request, &input); err != nil {
 		writeDecodeError(response, err)
+		return
+	}
+	if err := validateLabels(input.Labels); err != nil {
+		writeError(response, http.StatusBadRequest, err)
 		return
 	}
 	if strings.TrimSpace(input.Repository) == "" {
@@ -455,9 +464,17 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 			writeError(response, http.StatusBadRequest, err)
 			return
 		}
-		id, err := s.store.CreateTaskJob(request.Context(), task, input.Repository, input.Workflow, steps)
+		id, status, err := s.store.createLabeledTaskJob(request.Context(), task, input.Repository, input.Workflow, steps, input.Labels, input.SupersedesJobID)
 		if err != nil {
 			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
+		if status == http.StatusNotFound {
+			writeError(response, status, errors.New("superseded job not found"))
+			return
+		}
+		if status == http.StatusConflict {
+			writeError(response, status, errors.New("superseded job is already finished"))
 			return
 		}
 		writeJSON(response, http.StatusCreated, map[string]string{"id": id})
@@ -490,9 +507,17 @@ func (s *Server) submit(response http.ResponseWriter, request *http.Request) {
 	if command.Model == "" {
 		command.Model = definition.DefaultModel(input.Command)
 	}
-	jobID, err := s.store.CreateJob(request.Context(), input.Prompt, input.Repository, input.Command, command)
+	jobID, status, err := s.store.createLabeledJob(request.Context(), input.Prompt, input.Repository, input.Command, command, input.Labels, input.SupersedesJobID)
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	if status == http.StatusNotFound {
+		writeError(response, status, errors.New("superseded job not found"))
+		return
+	}
+	if status == http.StatusConflict {
+		writeError(response, status, errors.New("superseded job is already finished"))
 		return
 	}
 	writeJSON(response, http.StatusCreated, map[string]string{"id": jobID})
