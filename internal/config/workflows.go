@@ -13,9 +13,10 @@ type Workflow struct {
 	Steps []any `toml:"steps"`
 }
 type WorkflowStep struct {
-	SharedOutputs   bool     `json:"shared_outputs,omitempty"`
-	ID              string   `json:"id,omitempty"`
-	RequiredOutputs []string `json:"required_outputs,omitempty"`
+	SharedOutputs   bool       `json:"shared_outputs,omitempty"`
+	ID              string     `json:"id,omitempty"`
+	RequiredOutputs []string   `json:"required_outputs,omitempty"`
+	OnBlocked       *OnBlocked `json:"on_blocked,omitempty"`
 	// Inputs is read only for workflow plans saved before shared task files.
 	Inputs   map[string]string `json:"inputs,omitempty"`
 	Command  ResolvedCommand   `json:"command"`
@@ -42,7 +43,7 @@ func (c Config) ResolveTaskWorkflow(name, model string) ([]WorkflowStep, error) 
 			commandName = value
 		case map[string]any:
 			for key := range value {
-				if key != "command" && key != "approval" && key != "id" && key != "required_outputs" && key != "inputs" {
+				if key != "command" && key != "approval" && key != "id" && key != "required_outputs" && key != "inputs" && key != "on_blocked" {
 					return nil, fmt.Errorf("workflow %q step %d: unknown field %q", name, i+1, key)
 				}
 			}
@@ -95,6 +96,14 @@ func (c Config) ResolveTaskWorkflow(name, model string) ([]WorkflowStep, error) 
 		}
 		if seen[step.ID] {
 			return nil, fmt.Errorf("duplicate step ID %q; set an explicit id", step.ID)
+		}
+		if value, ok := raw.(map[string]any); ok {
+			if onBlocked, exists := value["on_blocked"]; exists {
+				step.OnBlocked, err = parseOnBlocked(name, i+1, onBlocked, seen)
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 		seen[step.ID] = true
 		step.SharedOutputs = true
