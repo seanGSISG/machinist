@@ -68,7 +68,7 @@ type settingChangeResponse struct {
 
 // loadDefinitions returns config.toml with the stored settings applied.
 func (s *Server) loadDefinitions(ctx context.Context) (config.Config, []config.SettingsProblem, error) {
-	file, err := config.LoadDefinitions(s.definitionPath)
+	file, _, err := s.loadDefinitionFile()
 	if err != nil {
 		return config.Config{}, nil, err
 	}
@@ -116,7 +116,7 @@ func applySettings(file config.Config, settings config.Settings, capabilities ma
 func (s *Server) settings(response http.ResponseWriter, request *http.Request) {
 	response.Header().Set("Cache-Control", "no-store")
 	ctx := request.Context()
-	file, err := config.LoadDefinitions(s.definitionPath)
+	file, _, err := s.loadDefinitionFile()
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return
@@ -254,7 +254,7 @@ func (s *Server) revertSetting(response http.ResponseWriter, request *http.Reque
 }
 
 func (s *Server) saveSetting(response http.ResponseWriter, request *http.Request, change SettingChange) {
-	file, err := config.LoadDefinitions(s.definitionPath)
+	file, _, err := s.loadDefinitionFile()
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return
