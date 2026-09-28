@@ -139,14 +139,16 @@ type submitCatalog struct {
 }
 
 type submitJobRequest struct {
-	Title      string `json:"title,omitempty"`
-	SourceURL  string `json:"source_url,omitempty"`
-	Spec       string `json:"spec,omitempty"`
-	Workflow   string `json:"workflow,omitempty"`
-	Prompt     string `json:"prompt"`
-	Repository string `json:"repository"`
-	Command    string `json:"command"`
-	Model      string `json:"model,omitempty"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	SupersedesJobID string            `json:"supersedes_job_id,omitempty"`
+	Title           string            `json:"title,omitempty"`
+	SourceURL       string            `json:"source_url,omitempty"`
+	Spec            string            `json:"spec,omitempty"`
+	Workflow        string            `json:"workflow,omitempty"`
+	Prompt          string            `json:"prompt"`
+	Repository      string            `json:"repository"`
+	Command         string            `json:"command"`
+	Model           string            `json:"model,omitempty"`
 }
 
 type submitJobResponse struct {
@@ -154,22 +156,28 @@ type submitJobResponse struct {
 }
 
 func newSubmitCommand(options *commandOptions) *cobra.Command {
-	var commandName, workflowName, prompt, model, repository, title, sourceURL, spec string
+	var commandName, workflowName, prompt, model, repository, title, sourceURL, spec, supersedes string
+	var labelFlags []string
 	submit := &cobra.Command{
 		Use:   "submit",
 		Short: "Queue work for a managed Machinist Worker",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
+			labels, err := parseSubmitLabels(labelFlags)
+			if err != nil {
+				return err
+			}
 			if title != "" || sourceURL != "" || spec != "" {
 				if workflowName == "" || prompt != "" {
 					return errors.New("task fields require --workflow and cannot be combined with --prompt")
 				}
-				return submitRequestToServer(command.Context(), options, submitJobRequest{Workflow: workflowName, Repository: repository, Model: model, Title: title, SourceURL: sourceURL, Spec: spec})
+				return submitRequestToServer(command.Context(), options, submitJobRequest{Labels: labels, SupersedesJobID: supersedes, Workflow: workflowName, Repository: repository, Model: model, Title: title, SourceURL: sourceURL, Spec: spec})
 			}
 			if strings.TrimSpace(prompt) == "" {
 				return errors.New("provide --spec or --source-url for a workflow, or --prompt for a command")
 			}
-			return submitSelection(command.Context(), options, commandName, prompt, model, repository, workflowName)
+			request := submitJobRequest{Labels: labels, SupersedesJobID: supersedes, Workflow: workflowName, Prompt: prompt, Repository: repository, Command: commandName, Model: model}
+			return submitRequestToServer(command.Context(), options, request)
 		},
 	}
 	submit.Flags().StringVar(&workflowName, "workflow", "", "workflow name from the control plane")
@@ -182,8 +190,25 @@ func newSubmitCommand(options *commandOptions) *cobra.Command {
 	submit.Flags().StringVar(&title, "title", "", "task title")
 	submit.Flags().StringVar(&sourceURL, "source-url", "", "original issue or task URL")
 	submit.Flags().StringVar(&spec, "spec", "", "task requirements")
+	submit.Flags().StringArrayVar(&labelFlags, "label", nil, "job label in key=value form (repeatable)")
+	submit.Flags().StringVar(&supersedes, "supersedes", "", "job ID atomically replaced by this job")
 	_ = submit.MarkFlagRequired("repo")
 	return submit
+}
+
+func parseSubmitLabels(values []string) (map[string]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	labels := make(map[string]string, len(values))
+	for _, value := range values {
+		key, labelValue, ok := strings.Cut(value, "=")
+		if !ok || key == "" {
+			return nil, fmt.Errorf("label %q must have the form key=value", value)
+		}
+		labels[key] = labelValue
+	}
+	return labels, nil
 }
 
 func submitSelection(ctx context.Context, options *commandOptions, commandName, prompt, model, repository string, workflows ...string) error {

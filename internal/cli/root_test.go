@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -386,8 +387,41 @@ func TestSubmitQueuesAgentWithConfiguredBearerToken(t *testing.T) {
 	if gotAuthorization != "Bearer secret" {
 		t.Fatalf("authorization = %q", gotAuthorization)
 	}
-	if gotRequest != (submitJobRequest{Prompt: "fix issue 13", Repository: "machinist", Command: "plan", Model: "luna"}) {
+	if !reflect.DeepEqual(gotRequest, submitJobRequest{Prompt: "fix issue 13", Repository: "machinist", Command: "plan", Model: "luna"}) {
 		t.Fatalf("submission = %#v", gotRequest)
+	}
+}
+
+func TestSubmitLabelFlags(t *testing.T) {
+	var got submitJobRequest
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/v1/catalog":
+			writeTestJSON(response, map[string]any{"commands": []string{"plan"}, "repositories": []string{"machinist"}})
+		case "/api/v1/jobs":
+			if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+				http.Error(response, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeTestJSON(response, map[string]string{"id": "job_new"})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	exitCode := Execute(t.Context(), []string{
+		"submit", "--command=plan", "--prompt=work", "--repo=machinist",
+		"--label=ticket=19", "--label=ticket=20", "--label=round=2",
+		"--supersedes=job_old", "--config=" + writeSubmitWorkerConfig(t, server.URL, "secret"),
+	}, strings.NewReader(""), &stdout, &stderr, "test")
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr = %q", exitCode, stderr.String())
+	}
+	wantLabels := map[string]string{"ticket": "20", "round": "2"}
+	if !reflect.DeepEqual(got.Labels, wantLabels) || got.SupersedesJobID != "job_old" {
+		t.Fatalf("submission labels = %#v, supersedes = %q", got.Labels, got.SupersedesJobID)
 	}
 }
 

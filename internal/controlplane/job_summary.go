@@ -7,6 +7,8 @@ import "time"
 type JobSummary struct {
 	Task             *TaskSummary      `json:"task,omitempty"`
 	Workflow         *WorkflowProgress `json:"workflow,omitempty"`
+	Labels           map[string]string `json:"labels"`
+	Superseded       bool              `json:"superseded"`
 	ID               string            `json:"id"`
 	Repository       string            `json:"repository"`
 	GitHubIssueTitle string            `json:"github_issue_title,omitempty"`
@@ -27,6 +29,7 @@ type TaskSummary struct {
 
 func newJobSummary(job Job) JobSummary {
 	summary := JobSummary{
+		Labels:           map[string]string{},
 		Workflow:         job.Workflow,
 		ID:               job.ID,
 		Repository:       job.Repository,
