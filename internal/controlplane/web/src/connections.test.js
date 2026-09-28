@@ -47,3 +47,14 @@ test("login requests send the CSRF and login tokens and surface errors", async (
   await assert.rejects(connectionsRequest("/api/v1/connections/sessions/login_1", { loginToken: "logintoken_y" }), (error) => error.status === 404 && /not found/.test(error.message));
   assert.equal(calls[1].options.headers["X-Machinist-CSRF"], undefined);
 });
+
+test("the polled connections list is returned as-is and the slim status carries none expired", async () => {
+  const body = { connections: [{ worker: "colo", executor: "claude", state: "expired", online: true, login: true }] };
+  globalThis.fetch = async (path, options) => {
+    assert.equal(path, "/api/v1/connections");
+    assert.equal(options.headers["X-Machinist-CSRF"], undefined);
+    return { ok: true, status: 200, json: async () => body };
+  };
+  assert.deepEqual(await connectionsRequest("/api/v1/connections"), body);
+  assert.deepEqual(expiredConnections({ connections: [] }.connections), []);
+});

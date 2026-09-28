@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { usePolling } from "@/use-polling";
 import { Copy, ExternalLink, KeyRound, Plug, RefreshCw, Send, Server, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,24 +14,14 @@ const tones = {
   muted: "border-border bg-muted text-muted-foreground",
 };
 
+const fetchConnections = () => connectionsRequest("/api/v1/connections");
+
 export function ConnectionsPage({ csrfToken }) {
-  const [state, setState] = useState({ loading: true, error: "", connections: [] });
+  const { data, error: loadError, refresh: reload } = usePolling(fetchConnections, 5000);
+  const state = { loading: !data && !loadError, error: loadError?.message || "", connections: data?.connections || [] };
   const [login, setLogin] = useState(null);
   const [startError, setStartError] = useState("");
   const [starting, setStarting] = useState("");
-  const reload = useCallback(async () => {
-    try {
-      const data = await connectionsRequest("/api/v1/connections");
-      setState({ loading: false, error: "", connections: data.connections });
-    } catch (error) {
-      setState((current) => ({ ...current, loading: false, error: error.message }));
-    }
-  }, []);
-  useEffect(() => {
-    reload();
-    const timer = window.setInterval(reload, 5000);
-    return () => window.clearInterval(timer);
-  }, [reload]);
 
   async function connect(connection, replace = false) {
     const key = `${connection.worker}/${connection.executor}`;
@@ -93,19 +84,14 @@ function LoginPanel({ login, csrfToken, close }) {
   const active = loginActive(session.state);
   const base = `/api/v1/connections/sessions/${encodeURIComponent(session.id)}`;
 
+  const fetchSession = useCallback(() => connectionsRequest(base, { loginToken: login.token }), [base, login.token]);
+  const { data: polled, error: pollError } = usePolling(active ? fetchSession : null, 1000);
   useEffect(() => {
-    if (!active) return undefined;
-    let stopped = false;
-    const timer = window.setInterval(async () => {
-      try {
-        const next = await connectionsRequest(base, { loginToken: login.token });
-        if (!stopped) { setSession(next); setError(""); }
-      } catch (requestError) {
-        if (!stopped) setError(requestError.message);
-      }
-    }, 1000);
-    return () => { stopped = true; window.clearInterval(timer); };
-  }, [active, base, login.token]);
+    if (polled) { setSession(polled); setError(""); }
+  }, [polled]);
+  useEffect(() => {
+    if (pollError) setError(pollError.message);
+  }, [pollError]);
 
   async function send(body) {
     setSending(true);

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, ArrowRight, Check } from "lucide-react";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -14,16 +14,42 @@ import {
   stateLabel,
   formatTimestamp,
 } from "./task-display.jsx";
+import { usePolling } from "./use-polling.js";
+
+// fetchJobDetail reads one job with its prompt, spec and recent runs. /status
+// only carries prompt-free summaries.
+async function fetchJobDetail(jobID, csrfToken) {
+  const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobID)}`, {
+    headers: { Accept: "application/json", "X-Machinist-CSRF": csrfToken },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    const error = new Error(body.error || `Task request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
+}
 
 export function TaskDetail({
   csrfToken,
-  job,
-  loaded,
+  jobID,
+  summary,
   error,
   deleting,
   onDelete,
   onWorkflowAction,
 }) {
+  const fetcher = useMemo(
+    () => (jobID && csrfToken ? () => fetchJobDetail(jobID, csrfToken) : null),
+    [jobID, csrfToken],
+  );
+  const { data, error: detailError, refresh } = usePolling(fetcher, 2000);
+  const job = data?.id === jobID ? data : undefined;
+  // Pick up state changes seen by the /status poll without waiting a tick.
+  useEffect(() => {
+    if (summary?.updated_at) refresh();
+  }, [summary?.updated_at, refresh]);
   const artifacts = useTaskArtifacts(job, csrfToken);
   if (!job)
     return (
@@ -31,10 +57,18 @@ export function TaskDetail({
         <a href="#/runs" className="text-sm underline">
           Back to tasks
         </a>
-        <p className="mt-4">{!loaded ? "Loading task…" : "Task not found."}</p>
-        {error && <p role="alert">{error}</p>}
+        <p className="mt-4">
+          {detailError?.status === 404 ? "Task not found." : "Loading task…"}
+        </p>
+        {(error || (detailError?.status !== 404 && detailError?.message)) && (
+          <p role="alert">{error || detailError.message}</p>
+        )}
       </div>
     );
+  const workflowAction = async (...args) => {
+    await onWorkflowAction(...args);
+    await refresh();
+  };
   const terminal = ["succeeded", "failed", "cancelled"].includes(job.state);
   const latest = job.runs.at(-1);
   const lastCompleted = job.runs.findLast((run) => run.outcome === "complete");
@@ -68,9 +102,9 @@ export function TaskDetail({
             Source ↗
           </a>
         )}
-        {error && (
+        {(error || detailError) && (
           <p role="alert" className="text-sm text-danger">
-            {error}
+            {error || detailError.message}
           </p>
         )}
       </header>
@@ -159,7 +193,7 @@ export function TaskDetail({
                     key={`${job.id}:${latest?.id}:${job.state}`}
                     job={job}
                     result={result}
-                    onAction={onWorkflowAction}
+                    onAction={workflowAction}
                   />
                 )}
               </Card>

@@ -3,7 +3,7 @@ import { RunDetail } from "./run-detail.jsx";
 import { GatePanel } from "./gate-panel.jsx";
 import { UsagePage } from "./usage.jsx";
 import { State, friendlyName, relativeTime } from "./task-display.jsx";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "@fontsource-variable/manrope";
 import { Activity, BarChart3, Bot, GitBranch, KeyRound, LayoutDashboard, Moon, Play, Plug, Plus, Server, Settings, Sun, Table2, TimerReset, X } from "lucide-react";
@@ -21,6 +21,7 @@ import { expiredConnections } from "@/connections";
 import { SettingsPage } from "@/settings.jsx";
 import { createStatusLoader } from "@/status-loader";
 import { TriggersPage } from "@/triggers";
+import { usePolling } from "@/use-polling";
 import "./styles.css";
 
 
@@ -46,11 +47,6 @@ function App() {
   const view = route.view;
   const statusLoader = useRef(null);
   if (!statusLoader.current) statusLoader.current = createStatusLoader({
-    request: async () => {
-      const response = await fetch("/api/v1/status", { headers: { Accept: "application/json" } });
-      if (!response.ok) throw new Error(`Status request failed (${response.status})`);
-      return response.json();
-    },
     apply: (result) => {
       if (result.kind === "error") {
         setStatusError(result.message);
@@ -81,20 +77,9 @@ function App() {
     return () => window.removeEventListener("hashchange", updateView);
   }, []);
 
-  useEffect(() => {
-    let stopped = false;
-    let timer;
-    const load = async () => {
-      await statusLoader.current.refresh();
-      if (!stopped) timer = window.setTimeout(load, 2000);
-    };
-    load();
-    return () => {
-      stopped = true;
-      statusLoader.current.cancel();
-      window.clearTimeout(timer);
-    };
-  }, []);
+  const loadStatus = useCallback(() => statusLoader.current.refresh(), []);
+  const { refresh: refreshStatus } = usePolling(loadStatus, 2000);
+  useEffect(() => () => statusLoader.current.cancel(), []);
 
   const choices = useMemo(() => selectionChoices(status), [status.commands, status.workflows]);
 
@@ -125,7 +110,7 @@ function App() {
       const created = await response.json();
       setPrompt(""); setTitle(""); setSourceURL("");
       setComposerOpen(false);
-      await statusLoader.current.refresh();
+      await refreshStatus();
       window.location.hash = `#/runs/${created.id}`;
     } catch (requestError) {
       setSubmitError(requestError.message);
@@ -142,7 +127,7 @@ function App() {
         body: JSON.stringify({ run_id: job.runs.at(-1)?.id, previous_process_stopped: stopped, feedback }),
       });
       if (!response.ok) { const body = await response.json().catch(() => ({})); throw new Error(body.error || "Unable to update job"); }
-      await statusLoader.current.refresh();
+      await refreshStatus();
     } catch (error) { setTaskActionError(error.message); }
   }
 
@@ -159,7 +144,7 @@ function App() {
         const body = await response.json().catch(() => ({}));
         throw new Error(body.error || `Delete failed (${response.status})`);
       }
-      await statusLoader.current.refresh();
+      await refreshStatus();
       window.location.hash = "#/runs";
     } catch (requestError) {
       setTaskActionError(requestError.message);
@@ -197,7 +182,7 @@ function App() {
       </aside>
 
       <main className="workshop min-w-0 flex-1">
-        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} job={selectedJob} loaded={statusLoaded} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "run" ? <RunDetail runID={route.runID} /> : view === "gate" ? <GatePanel jobID={route.jobID} /> : view === "usage" ? <UsagePage /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : view === "settings" ? <SettingsPage csrfToken={status.csrf_token} /> : view === "connections" ? <ConnectionsPage csrfToken={status.csrf_token} /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
+        {view === "task" ? <TaskDetail csrfToken={status.csrf_token} jobID={route.jobID} summary={selectedJob} error={statusError || taskActionError} deleting={deletingJob === route.jobID} onDelete={deleteJob} onWorkflowAction={workflowAction} /> : view === "run" ? <RunDetail runID={route.runID} /> : view === "gate" ? <GatePanel jobID={route.jobID} /> : view === "usage" ? <UsagePage /> : view === "analytics" ? <Analytics jobs={status.jobs} loaded={statusLoaded} error={statusError} /> : view === "workers" ? <WorkersPage workers={status.workers} loaded={statusLoaded} error={statusError} /> : view === "triggers" ? <TriggersPage triggers={status.triggers || []} loaded={statusLoaded} error={statusError} /> : ["commands", "workflows"].includes(view) ? <CommandsPage /> : view === "settings" ? <SettingsPage csrfToken={status.csrf_token} /> : view === "connections" ? <ConnectionsPage csrfToken={status.csrf_token} /> : <div className="mx-auto max-w-[1500px] space-y-6 p-4 sm:p-6 lg:p-8">
           <PageHeading title="Tasks" description="Describe the work. Review the result.">
             <div className="flex items-center gap-2">
               <Button className="text-xs!" onClick={() => setComposerOpen(true)}><Plus className="size-4" />New task</Button>
