@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { analyticsState } from "./analytics-state.js";
-import { createStatusLoader } from "./status-loader.js";
+import { createStatusLoader, fetchStatus } from "./status-loader.js";
 
 const measuredJob = { created_at: "2026-08-25T10:00:00Z", state: "succeeded", runs: [{
   id: "run_latest",
@@ -11,6 +11,20 @@ const measuredJob = { created_at: "2026-08-25T10:00:00Z", state: "succeeded", ru
   token_usage: "4321",
 }] };
 const now = new Date("2026-08-25T15:00:00Z");
+// Mirrors testdata/status_schema.golden.json: job summaries carry no prompt or spec.
+const slimStatus = {
+  schema_version: 1,
+  generated_at: "2026-09-27T12:00:00Z",
+  csrf_token: "<csrf>",
+  commands: ["plan"], workflows: [], repositories: [], triggers: [], workers: [], executors: [], connections: [], logins: [],
+  blocked_jobs: [], gates_awaiting_approval: [],
+  jobs: [{
+    id: "job_golden", repository: "machinist", command: "plan", state: "running",
+    created_at: "2026-09-27T12:00:00Z", updated_at: "2026-09-27T12:00:00Z",
+    task: { title: "Golden task", source_url: "" },
+    runs: [{ id: "run_golden", command: "plan", executor: "test", model: "model", state: "queued", started_at: "0001-01-01T00:00:00Z", completed_at: "0001-01-01T00:00:00Z" }],
+  }],
+};
 
 test("analytics shows loading instead of empty metrics before status loads", () => {
   assert.deepEqual(analyticsState({ jobs: [], days: "30", loaded: false, error: "", now }), { kind: "loading" });
@@ -58,6 +72,40 @@ test("an older success cannot replace a newer request failure", async () => {
   await olderRefresh;
 
   assert.deepEqual(applied, [{ kind: "error", message: "newer request failed" }]);
+});
+
+test("status is fetched from /status and passed through untouched", async () => {
+  const calls = [];
+  const status = await fetchStatus(async (path, options) => {
+    calls.push({ path, options });
+    return { ok: true, status: 200, json: async () => structuredClone(slimStatus) };
+  });
+  assert.deepEqual(calls, [{ path: "/api/v1/status", options: { headers: { Accept: "application/json" } } }]);
+  assert.deepEqual(status, slimStatus);
+  assert.equal("prompt" in status.jobs[0], false);
+  assert.equal("spec" in status.jobs[0].task, false);
+});
+
+test("a failed status response reports its HTTP status", async () => {
+  await assert.rejects(fetchStatus(async () => ({ ok: false, status: 503 })), /Status request failed \(503\)/);
+});
+
+test("the loader applies the slim status snapshot", async () => {
+  const applied = [];
+  const loader = createStatusLoader({ request: async () => slimStatus, apply: (result) => applied.push(result) });
+  await loader.refresh();
+  assert.deepEqual(applied, [{ kind: "success", status: slimStatus }]);
+});
+
+test("a cancelled loader ignores in-flight responses", async () => {
+  const pending = deferred();
+  const applied = [];
+  const loader = createStatusLoader({ request: () => pending.promise, apply: (result) => applied.push(result) });
+  const refresh = loader.refresh();
+  loader.cancel();
+  pending.resolve(slimStatus);
+  await refresh;
+  assert.deepEqual(applied, []);
 });
 
 function deferred() {

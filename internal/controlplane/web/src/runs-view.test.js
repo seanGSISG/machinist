@@ -42,6 +42,8 @@ test("runs default to board view and share filters when switching views", async 
         { id: "file_build", run_id: "build", path: "result.md", size: 10, content_type: "text/plain" },
       ] };
     }
+    const detail = [detailJob, interruptedJob].find((job) => url === `/api/v1/jobs/${job.id}`);
+    if (detail) return { ok: true, json: async () => structuredClone(detail) };
     if (url.endsWith("/content")) return { ok: true, text: async () => "<script>literal file text</script>" };
     return { ok: true, json: async () => ({ jobs: [...jobs, detailJob, interruptedJob], workers: [], commands: [], repositories: [], triggers: [], csrf_token: "test" }) };
   };
