@@ -136,8 +136,8 @@ func TestAuthHysteresis(t *testing.T) {
 			if err := store.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM events`).Scan(&events); err != nil {
 				t.Fatal(err)
 			}
-			if state != protocol.AuthUnknown || events != 1 {
-				t.Fatalf("repeated snapshot state = %q, events = %d; want unknown, 1", state, events)
+			if state != authStateRechecking || events != 1 {
+				t.Fatalf("repeated snapshot state = %q, events = %d; want rechecking, 1", state, events)
 			}
 
 			secondFailureAt := firstFailureAt.Add(authRecheckDelay)
@@ -154,5 +154,70 @@ func TestAuthHysteresis(t *testing.T) {
 				t.Fatalf("second failed check state = %q, want expired", state)
 			}
 		})
+	})
+
+	t.Run("inconclusive reports are not failures", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			reports func(time.Time) []protocol.ExecutorAuthReport
+			want    string
+		}{
+			{
+				name: "unknown checks do not expire a connected login",
+				reports: func(now time.Time) []protocol.ExecutorAuthReport {
+					first := now.Add(time.Minute)
+					second := first.Add(time.Minute)
+					return []protocol.ExecutorAuthReport{
+						{State: protocol.AuthUnknown, Detail: "status check timed out", CheckedAt: &first},
+						{State: protocol.AuthUnknown, Detail: "status check exited with code 127", CheckedAt: &second},
+					}
+				},
+				want: protocol.AuthConnected,
+			},
+			{
+				name: "snapshots without a check are not re-observed",
+				reports: func(time.Time) []protocol.ExecutorAuthReport {
+					return []protocol.ExecutorAuthReport{
+						{State: protocol.AuthUnknown, Detail: "status unavailable"},
+						{State: protocol.AuthUnknown, Detail: "status unavailable"},
+					}
+				},
+				want: protocol.AuthConnected,
+			},
+		}
+
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				store := openTestStore(t, filepath.Join(t.TempDir(), "machinist.db"))
+				now := time.Now().UTC()
+				store.now = func() time.Time { return now }
+				request := protocol.AuthSyncRequest{InstanceID: "worker-1", Name: "colo", Executors: map[string]protocol.ExecutorAuthReport{
+					"claude": {State: protocol.AuthConnected, CheckedAt: &now},
+				}}
+				if err := store.RecordExecutorAuth(t.Context(), request); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.db.ExecContext(t.Context(), `DELETE FROM events`); err != nil {
+					t.Fatal(err)
+				}
+				for _, report := range test.reports(now) {
+					request.Executors["claude"] = report
+					if err := store.RecordExecutorAuth(t.Context(), request); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var state string
+				var events int
+				if err := store.db.QueryRowContext(t.Context(), `SELECT state FROM worker_executor_auth WHERE worker_instance='worker-1' AND executor='claude'`).Scan(&state); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM events`).Scan(&events); err != nil {
+					t.Fatal(err)
+				}
+				if state != test.want || events != 0 {
+					t.Fatalf("state = %q, events = %d; want %q, 0", state, events, test.want)
+				}
+			})
+		}
 	})
 }

@@ -61,13 +61,14 @@ func (s *Store) RecordExecutorAuth(ctx context.Context, request protocol.AuthSyn
 	}
 	for _, executor := range slices.Sorted(maps.Keys(request.Executors)) {
 		report := request.Executors[executor]
-		prior := previous[executor]
+		prior, existed := previous[executor]
 		priorState := prior.state
 		fsm := authFSMForStoredState(priorState)
-		before := fsm.state
+		before := authEventState(priorState, existed)
 		after := before
-		state := priorState
-		if !sameAuthCheck(prior.checkedAt, report.CheckedAt) {
+		state := stateWithoutObservation(priorState, report.State, existed)
+		observation := isAuthObservation(report)
+		if observation && !sameAuthCheck(prior.checkedAt, report.CheckedAt) {
 			result := authCheckResult(report)
 			// A worker's first expired observation is authoritative. Hysteresis is
 			// useful only when there is a previously healthy login to preserve.
@@ -76,6 +77,10 @@ func (s *Store) RecordExecutorAuth(ctx context.Context, request protocol.AuthSyn
 			}
 			after, _ = fsm.Observe(result, nowTime)
 			state = storedAuthState(after, report.State)
+		} else if observation {
+			state = priorState
+		} else {
+			after = authEventState(state, true)
 		}
 		if before != after {
 			if err := s.AppendEvent(ctx, tx, Event{
@@ -124,10 +129,36 @@ func authFSMForStoredState(state string) authFSM {
 	switch state {
 	case protocol.AuthExpired:
 		return authFSM{state: authStateExpired, softFailures: 2}
-	case protocol.AuthUnknown:
+	case authStateRechecking:
 		return authFSM{state: authStateRechecking, softFailures: 1}
 	default:
 		return authFSM{state: authStateOK}
+	}
+}
+
+// isAuthObservation excludes snapshots for recipes with no status command and
+// checks where the worker could not determine auth state. Neither is evidence
+// that a previously working login has expired.
+func isAuthObservation(report protocol.ExecutorAuthReport) bool {
+	return report.CheckedAt != nil && report.State != protocol.AuthUnknown
+}
+
+func stateWithoutObservation(prior, reported string, existed bool) string {
+	if existed && reported == protocol.AuthUnknown {
+		return prior
+	}
+	return reported
+}
+
+func authEventState(stored string, existed bool) string {
+	if !existed || stored == protocol.AuthUnknown {
+		return protocol.AuthUnknown
+	}
+	switch stored {
+	case protocol.AuthConnected, protocol.AuthExpiring:
+		return authStateOK
+	default:
+		return stored
 	}
 }
 
@@ -142,7 +173,7 @@ func authCheckResult(report protocol.ExecutorAuthReport) CheckResult {
 		result.StatusCode = 401
 	}
 	result.LoggedOut = strings.Contains(detail, "logged out") || strings.Contains(detail, "logout") ||
-		strings.Contains(detail, "not logged in") || strings.Contains(detail, "did not report a login")
+		strings.Contains(detail, "not logged in") || detail == "status check did not report a login"
 	return result
 }
 
@@ -156,7 +187,7 @@ func storedAuthState(state, reported string) string {
 	case authStateExpired:
 		return protocol.AuthExpired
 	default:
-		return protocol.AuthUnknown
+		return authStateRechecking
 	}
 }
 
