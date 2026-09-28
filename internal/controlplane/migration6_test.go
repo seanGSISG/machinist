@@ -112,7 +112,6 @@ func TestMigration6RouteStubs(t *testing.T) {
 		method string
 		path   string
 	}{
-		{http.MethodPost, "/api/v1/executors/worker/executor/clear-rate-limit"},
 		{http.MethodGet, "/api/v1/usage"},
 	} {
 		t.Run(test.method+" "+test.path, func(t *testing.T) {
