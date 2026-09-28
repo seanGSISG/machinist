@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","model":"claude-sonnet"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1790000000,"rateLimitType":"five_hour"}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"fixture: Claude AI usage limit reached|1790000000 and You've hit your usage limit ... try again in 2 hours"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"The classifier matches 'You've hit your usage limit' and RESOURCE_EXHAUSTED."}]}}
+{"type":"result","subtype":"success","is_error":true,"result":"Tests failed: 3 failures"}

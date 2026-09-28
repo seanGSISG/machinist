@@ -1,0 +1,2 @@
+ERROR: exceeded retry limit, last status: 429 Too Many Requests, request id: req_123
+{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","code":"insufficient_quota"}}

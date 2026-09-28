@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","model":"claude-sonnet"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1780000000,"rateLimitType":"five_hour"}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1790003600,"rateLimitType":"five_hour"}}
+{"type":"result","subtype":"success","is_error":true,"result":"Claude AI usage limit reached|1790000000"}

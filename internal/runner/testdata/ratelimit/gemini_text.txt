@@ -1,0 +1,2 @@
+Error when talking to Gemini API
+[API Error: Quota exceeded for quota metric 'Generate Content API requests per minute' and limit 'GenerateContent request limit per minute' of service 'generativelanguage.googleapis.com'. Please retry in 1m30.5s.]
