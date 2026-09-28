@@ -3,7 +3,6 @@ package controlplane
 import (
 	"database/sql"
 	"encoding/json"
-	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -101,34 +100,6 @@ PRAGMA user_version=5;`); err != nil {
 	}
 	if version != 7 || jobs != 1 || runs != 1 {
 		t.Fatalf("upgraded version=%d jobs=%d runs=%d, want 7, 1, 1", version, jobs, runs)
-	}
-}
-
-func TestMigration6RouteStubs(t *testing.T) {
-	_, web := newTestHTTPServer(t)
-	defer web.Close()
-
-	for _, test := range []struct {
-		method string
-		path   string
-	}{
-		{http.MethodGet, "/api/v1/usage"},
-	} {
-		t.Run(test.method+" "+test.path, func(t *testing.T) {
-			request, err := http.NewRequest(test.method, web.URL+test.path, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			request.Header.Set("Authorization", "Bearer secret")
-			response, err := http.DefaultClient.Do(request)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer response.Body.Close()
-			if response.StatusCode != http.StatusNotImplemented {
-				t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusNotImplemented)
-			}
-		})
 	}
 }
 
