@@ -50,6 +50,7 @@ type Options struct {
 	DataDirectory string
 	Stdout        io.Writer
 	Stderr        io.Writer
+	Log           *LogRing
 }
 
 type Result struct {
@@ -267,9 +268,15 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if usageCollector == nil {
 		usageCollector = &structuredUsageCollector{}
 	}
-	stdoutDestination := io.MultiWriter(options.Stdout, usageCollector)
+	stdoutWriters := []io.Writer{options.Stdout, usageCollector}
+	stderrDestination := options.Stderr
+	if options.Log != nil {
+		stdoutWriters = append(stdoutWriters, options.Log)
+		stderrDestination = io.MultiWriter(options.Stderr, options.Log)
+	}
+	stdoutDestination := io.MultiWriter(stdoutWriters...)
 	go pumpStream(&streams, stdoutReader, stdoutDestination, "stdout", log, streamErrors)
-	go pumpStream(&streams, stderrReader, options.Stderr, "stderr", log, streamErrors)
+	go pumpStream(&streams, stderrReader, stderrDestination, "stderr", log, streamErrors)
 	streamsDone := make(chan struct{})
 	go func() {
 		streams.Wait()
