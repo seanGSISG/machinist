@@ -50,6 +50,7 @@
     "executors": [],
     "gates_awaiting_approval": [],
     "generated_at": "2026-09-27T12:00:00Z",
+    "invalid_commands": [],
     "jobs": [
       {
         "attention_reason": null,

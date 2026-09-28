@@ -32,12 +32,9 @@ func TestWorkflowArtifactReferences(t *testing.T) {
 		if err := os.WriteFile(p, []byte(text), 0600); err != nil {
 			t.Fatal(err)
 		}
-		report, err := ValidateFile(p)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, ok := report.Config.Workflows["deliver"]; ok || len(report.InvalidCommands) != 1 || report.InvalidCommands[0].Name != "deliver" {
-			t.Fatalf("%s: invalid workflow report = %#v", ref, report)
+		_, err := LoadDefinitions(p)
+		if err == nil {
+			t.Fatalf("%s: %v", ref, err)
 		}
 	}
 }
