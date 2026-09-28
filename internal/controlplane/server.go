@@ -420,6 +420,11 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
+	executors, err := s.store.ExecutorStatuses(request.Context())
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
 	jobs := cappedJobSummaries(snapshot.Jobs, definition.Server.FinishedJobLimit())
 	if err := s.store.enrichJobSummaries(request.Context(), jobs); err != nil {
 		writeError(response, http.StatusInternalServerError, err)
@@ -436,7 +441,7 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		Commands:              definition.CommandNames(),
 		Workflows:             definition.WorkflowNames(),
 		Repositories:          repositories,
-		Executors:             []ExecutorStatus{},
+		Executors:             executors,
 		GatesAwaitingApproval: gates,
 		BlockedJobs:           blocked,
 		Logins:                logins,
