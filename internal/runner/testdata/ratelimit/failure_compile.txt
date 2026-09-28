@@ -1,0 +1,3 @@
+# github.com/example/project
+./main.go:12:2: undefined: rateLimit
+FAIL	github.com/example/project [build failed]

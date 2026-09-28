@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","model":"claude-sonnet"}
+{"type":"result","subtype":"success","is_error":true,"result":"Credit balance is too low"}

@@ -50,6 +50,9 @@ type Options struct {
 	DataDirectory string
 	Stdout        io.Writer
 	Stderr        io.Writer
+	// RateLimitBackoff is the previous estimated rate-limit backoff for this
+	// command; it seeds the doubling estimate when no reset time is reported.
+	RateLimitBackoff time.Duration
 }
 
 type Result struct {
@@ -68,6 +71,12 @@ type Result struct {
 	Usage          *protocol.Usage      `json:"usage,omitempty"`
 	FinalMessage   string               `json:"final_message,omitempty"`
 	EventsPath     string               `json:"events_path"`
+	FailureClass   string               `json:"failure_class,omitempty"`
+	ResetAt        *time.Time           `json:"reset_at,omitempty"`
+	ResetSource    string               `json:"reset_source,omitempty"`
+	// RateLimitBackoffMillis is set only for estimated resets and should be
+	// passed back as Options.RateLimitBackoff on the next run.
+	RateLimitBackoffMillis int64 `json:"rate_limit_backoff_millis,omitempty"`
 }
 
 type OutcomeError struct {
@@ -267,9 +276,11 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	if usageCollector == nil {
 		usageCollector = &structuredUsageCollector{}
 	}
-	stdoutDestination := io.MultiWriter(options.Stdout, usageCollector)
+	stdoutTail := newTailBuffer(rateLimitTailBytes)
+	stderrTail := newTailBuffer(rateLimitTailBytes)
+	stdoutDestination := io.MultiWriter(options.Stdout, usageCollector, stdoutTail)
 	go pumpStream(&streams, stdoutReader, stdoutDestination, "stdout", log, streamErrors)
-	go pumpStream(&streams, stderrReader, options.Stderr, "stderr", log, streamErrors)
+	go pumpStream(&streams, stderrReader, io.MultiWriter(options.Stderr, stderrTail), "stderr", log, streamErrors)
 	streamsDone := make(chan struct{})
 	go func() {
 		streams.Wait()
@@ -291,6 +302,9 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		} else {
 			result.StepResult = step
 		}
+	}
+	if state == StateFailed {
+		classifyRateLimit(&result, append(stdoutTail.lines(), stderrTail.lines()...), exitCode, options.RateLimitBackoff)
 	}
 	var collectedTokenUsage *int64
 	collectedUsage, collectedTokenUsageIsAuthoritative := usageCollector.structuredUsage()
