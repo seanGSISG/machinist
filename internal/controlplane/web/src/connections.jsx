@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { usePolling } from "@/use-polling";
-import { Copy, ExternalLink, KeyRound, Plug, RefreshCw, Send, Server, X } from "lucide-react";
+import { Copy, Cpu, ExternalLink, KeyRound, Plug, RefreshCw, Send, Server, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { PageHeading, QuietState } from "@/components/ui/page-heading";
+import { ExecutorBadge } from "@/executor-badge";
 import { connectionStateLabel, connectionTone, connectionsRequest, groupConnectionsByWorker, loginActive, loginKeys, loginResult, loginStep, safeLoginURL } from "@/connections";
 
 const tones = {
@@ -15,10 +16,13 @@ const tones = {
 };
 
 const fetchConnections = () => connectionsRequest("/api/v1/connections");
+const fetchExecutors = () => connectionsRequest("/api/v1/status");
 
 export function ConnectionsPage({ csrfToken }) {
   const { data, error: loadError, refresh: reload } = usePolling(fetchConnections, 5000);
   const state = { loading: !data && !loadError, error: loadError?.message || "", connections: data?.connections || [] };
+  const { data: status, refresh: reloadExecutors } = usePolling(fetchExecutors, 5000);
+  const executors = status?.executors || [];
   const [login, setLogin] = useState(null);
   const [startError, setStartError] = useState("");
   const [starting, setStarting] = useState("");
@@ -53,7 +57,21 @@ export function ConnectionsPage({ csrfToken }) {
     </Card>)}
       <p className="text-xs text-muted-foreground">An executor appears here once its worker declares <code>[executors.&lt;name&gt;.auth]</code> in worker.toml. Runs are not given to an executor whose login has expired.</p>
     </div> : <Card><QuietState title="No connections yet." description="Add an [executors.<name>.auth] recipe to a worker's worker.toml to manage its login here." /></Card>}
+    {executors.length > 0 && <ExecutorAvailability executors={executors} csrfToken={csrfToken} reload={reloadExecutors} />}
   </div>;
+}
+
+// Rate-limited executors are skipped by the lease query until their reset; Clear ends the stall early.
+function ExecutorAvailability({ executors, csrfToken, reload }) {
+  return <Card className="max-w-5xl overflow-hidden">
+    <header className="border-b border-border px-5 py-3">
+      <h2 className="flex items-center gap-2 text-sm font-semibold"><Cpu className="size-4 text-muted-foreground" />Executor availability</h2>
+    </header>
+    {executors.map((executor) => <article key={executor.id} className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3 last:border-b-0">
+      <p className="text-sm"><span className="font-medium">{executor.executor}</span><span className="text-muted-foreground"> on {executor.worker}</span></p>
+      <ExecutorBadge executor={executor} csrfToken={csrfToken} onCleared={reload} />
+    </article>)}
+  </Card>;
 }
 
 function ConnectionRow({ connection, busy, starting, connect }) {

@@ -39,6 +39,9 @@ var webAssets embed.FS
 type Server struct {
 	store             *Store
 	definitionPath    string
+	configMu          sync.Mutex
+	lastGoodConfig    config.Config
+	invalidCommands   []config.InvalidCommand
 	triggers          []config.ResolvedTrigger
 	github            githubTriggerClient
 	schedulerEvery    time.Duration
@@ -99,11 +102,13 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 	if err != nil {
 		return nil, err
 	}
-	managedTriggers, err := config.LoadTriggers(definitionPath)
+	report, err := config.ValidateFile(definitionPath)
 	if err != nil {
 		return nil, err
 	}
-	definition, e := config.LoadDefinitions(definitionPath)
+	definition := report.Config
+	dropTriggersForInvalidCommands(&definition, report.InvalidCommands)
+	managedTriggers, e := definition.ResolveTriggers()
 	if e != nil {
 		return nil, e
 	}
@@ -126,7 +131,8 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 		return nil, fmt.Errorf("restore managed triggers: %w", err)
 	}
 	server := &Server{
-		store: store, definitionPath: definitionPath, triggers: managedTriggers,
+		store: store, definitionPath: definitionPath, lastGoodConfig: definition,
+		invalidCommands: append([]config.InvalidCommand{}, report.InvalidCommands...), triggers: managedTriggers,
 		github: NewGitHubCLI("gh", 30*time.Second), now: time.Now,
 		schedulerEvery: 30 * time.Second, shutdownTimeout: 5 * time.Second,
 		schedulerError:    func(err error) { log.Printf("scheduler: %v", err) },
@@ -141,6 +147,57 @@ func NewServer(store *Store, definitionPath, workerToken string, maxConcurrentJo
 }
 
 func (s *Server) Handler() http.Handler { return s.handler }
+
+// loadDefinitionFile applies syntactically valid reloads and retains the last
+// good file when a write is incomplete or otherwise not valid TOML.
+func (s *Server) loadDefinitionFile() (config.Config, []config.InvalidCommand, error) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	report, err := config.ValidateFile(s.definitionPath)
+	if err != nil {
+		if s.lastGoodConfig.Path() != "" {
+			log.Printf("reload control plane configuration: %v; keeping last good configuration", err)
+			return s.lastGoodConfig, append([]config.InvalidCommand{}, s.invalidCommands...), nil
+		}
+		return config.Config{}, []config.InvalidCommand{}, err
+	}
+	s.lastGoodConfig = report.Config
+	s.invalidCommands = append([]config.InvalidCommand{}, report.InvalidCommands...)
+	return s.lastGoodConfig, append([]config.InvalidCommand{}, s.invalidCommands...), nil
+}
+
+func (s *Server) currentInvalidCommands() []config.InvalidCommand {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	return append([]config.InvalidCommand{}, s.invalidCommands...)
+}
+
+func dropTriggersForInvalidCommands(definition *config.Config, invalid []config.InvalidCommand) {
+	invalidNames := make(map[string]bool, len(invalid))
+	for _, entry := range invalid {
+		if _, loaded := definition.Commands[entry.Name]; !loaded {
+			invalidNames[entry.Name] = true
+		}
+	}
+	for name, trigger := range definition.Triggers.GitHub {
+		if invalidNames[trigger.Command] {
+			log.Printf("dropping trigger github/%s because command %q is invalid", name, trigger.Command)
+			delete(definition.Triggers.GitHub, name)
+		}
+	}
+	for name, trigger := range definition.Triggers.Interval {
+		if invalidNames[trigger.Command] {
+			log.Printf("dropping trigger interval/%s because command %q is invalid", name, trigger.Command)
+			delete(definition.Triggers.Interval, name)
+		}
+	}
+	for name, trigger := range definition.Triggers.Cron {
+		if invalidNames[trigger.Command] {
+			log.Printf("dropping trigger cron/%s because command %q is invalid", name, trigger.Command)
+			delete(definition.Triggers.Cron, name)
+		}
+	}
+}
 
 func (s *Server) Serve(ctx context.Context, listen string, onListening func(net.Addr)) error {
 	if err := validateLoopbackListen(listen); err != nil {
@@ -363,12 +420,18 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
+	executors, err := s.store.ExecutorStatuses(request.Context())
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
 	jobs := cappedJobSummaries(snapshot.Jobs, definition.Server.FinishedJobLimit())
 	if err := s.store.enrichJobSummaries(request.Context(), jobs); err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(response, http.StatusOK, StatusResponse{
+	gates, blocked, logins := deriveAttention(request, jobs, connections)
+	status := StatusResponse{
 		SchemaVersion:         statusSchemaVersion,
 		GeneratedAt:           now,
 		Jobs:                  jobs,
@@ -378,11 +441,18 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		Commands:              definition.CommandNames(),
 		Workflows:             definition.WorkflowNames(),
 		Repositories:          repositories,
-		Executors:             []ExecutorStatus{},
-		GatesAwaitingApproval: []StatusItem{},
-		BlockedJobs:           []StatusItem{},
-		Logins:                []StatusItem{},
+		Executors:             executors,
+		GatesAwaitingApproval: gates,
+		BlockedJobs:           blocked,
+		Logins:                logins,
 		CSRFToken:             s.csrfToken,
+	}
+	writeJSON(response, http.StatusOK, struct {
+		StatusResponse
+		InvalidCommands []config.InvalidCommand `json:"invalid_commands"`
+	}{
+		StatusResponse:  status,
+		InvalidCommands: s.currentInvalidCommands(),
 	})
 }
 

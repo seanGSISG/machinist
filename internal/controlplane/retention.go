@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"time"
-
-	"github.com/owainlewis/machinist/internal/config"
 )
 
 func (s *Server) pruneRetention(ctx context.Context, now time.Time) error {
-	definition, err := config.LoadDefinitions(s.definitionPath)
+	definition, _, err := s.loadDefinitionFile()
 	if err != nil {
 		return fmt.Errorf("load retention configuration: %w", err)
 	}

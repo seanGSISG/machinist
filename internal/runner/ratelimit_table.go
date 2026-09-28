@@ -47,6 +47,11 @@ var rateLimitPatterns = []rateLimitPattern{
 	// Detect-only phrasings: limit or spend cap without a parseable reset.
 	{vendor: "claude", kind: resetNone, pattern: regexp.MustCompile(`(?i)claude ai usage limit reached|credit balance is too low|(?:5-hour|weekly|opus|session) limit reached|you've hit your (?:usage )?limit`)},
 	{vendor: "codex", kind: resetNone, pattern: regexp.MustCompile(`(?i)you've hit your usage limit|usage_limit_reached|usage limit has been reached|insufficient_quota|exceeded your current quota|rate_limit_exceeded`)},
+	// Provider capacity/overload errors are transient infrastructure failures
+	// with no reset time: "Selected model is at capacity", Claude "API Error:
+	// 529" with an overloaded_error body.
+	{vendor: "codex", kind: resetNone, pattern: regexp.MustCompile(`(?i)selected model is at capacity|\bmodel is (?:currently )?overloaded\b|\bserver_is_overloaded\b|\bslow_down\b`)},
+	{vendor: "claude", kind: resetNone, pattern: regexp.MustCompile(`(?i)\boverloaded_error\b|\bapi error: 529\b|"type"\s*:\s*"overloaded"`)},
 	{vendor: "gemini", kind: resetNone, pattern: regexp.MustCompile(`(?i)resource_exhausted|quota exceeded for quota metric|exhausted your (?:daily )?(?:quota|capacity)|quota will reset`)},
 	{vendor: "generic", kind: resetNone, pattern: regexp.MustCompile(`(?i)\b429 too many requests\b|\brate limit(?:ed| exceeded| reached)\b|\bspend(?:ing)? (?:limit|cap) (?:reached|exceeded)\b`)},
 }
