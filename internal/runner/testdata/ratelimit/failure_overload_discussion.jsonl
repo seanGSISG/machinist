@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","model":"claude-sonnet"}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"fixture: Selected model is at capacity; API Error: 529 overloaded_error; server_is_overloaded"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"The classifier now matches 'model is overloaded' and slow_down."}]}}
+{"type":"result","subtype":"success","is_error":true,"result":"Tests failed: 1 failure"}
