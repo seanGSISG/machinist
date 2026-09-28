@@ -228,9 +228,14 @@ export function TaskDetail({
                         >
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <h3 className="font-medium">
-                              {run.outcome === "changes_requested"
-                                ? "Changes requested"
-                                : friendlyName(run.command)}
+                              <a
+                                href={runHref(run.id)}
+                                className="hover:underline"
+                              >
+                                {run.outcome === "changes_requested"
+                                  ? "Changes requested"
+                                  : friendlyName(run.command)}
+                              </a>
                             </h3>
                             <State
                               value={
@@ -344,7 +349,7 @@ function ExecutionDetails({ run }) {
             run.exit_code === undefined ? "Unavailable" : String(run.exit_code)
           }
         />
-        <RunMetric label="Run ID" value={run.id} mono />
+        <RunMetric label="Run ID" value={run.id} href={runHref(run.id)} mono />
         <RunMetric label="Executor" value={run.executor} />
         <RunMetric label="Worker" value={run.worker_name || "Unassigned"} />
         <RunMetric
@@ -369,7 +374,11 @@ function ExecutionDetails({ run }) {
   );
 }
 
-function RunMetric({ label, value, mono = false }) {
+function runHref(runID) {
+  return `#/run/${encodeURIComponent(runID)}`;
+}
+
+function RunMetric({ label, value, href, mono = false }) {
   return (
     <div className="min-w-0">
       <dt className="text-xs text-muted-foreground">{label}</dt>
@@ -377,7 +386,13 @@ function RunMetric({ label, value, mono = false }) {
         className={cn("mt-0.5 truncate text-sm", mono && "font-mono")}
         title={value}
       >
-        {value}
+        {href ? (
+          <a href={href} className="text-primary underline">
+            {value}
+          </a>
+        ) : (
+          value
+        )}
       </dd>
     </div>
   );
