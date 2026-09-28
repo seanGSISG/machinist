@@ -17,8 +17,8 @@ func TestMigration6FreshDB(t *testing.T) {
 	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 {
-		t.Fatalf("schema version = %d, want 6", version)
+	if version != 7 {
+		t.Fatalf("schema version = %d, want 7", version)
 	}
 
 	for table, columns := range map[string][]string{
@@ -99,8 +99,8 @@ PRAGMA user_version=5;`); err != nil {
 	if err := store.db.QueryRow(`SELECT COUNT(*) FROM runs WHERE id='run_kept' AND job_id='job_kept' AND rendered_prompt='rendered'`).Scan(&runs); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 || jobs != 1 || runs != 1 {
-		t.Fatalf("upgraded version=%d jobs=%d runs=%d, want 6, 1, 1", version, jobs, runs)
+	if version != 7 || jobs != 1 || runs != 1 {
+		t.Fatalf("upgraded version=%d jobs=%d runs=%d, want 7, 1, 1", version, jobs, runs)
 	}
 }
 
@@ -116,7 +116,6 @@ func TestMigration6RouteStubs(t *testing.T) {
 		{http.MethodPost, "/api/v1/runs/run_1/log"},
 		{http.MethodGet, "/api/v1/runs/run_1/log"},
 		{http.MethodGet, "/api/v1/usage"},
-		{http.MethodPost, "/api/v1/jobs/job_1/rewind"},
 	} {
 		t.Run(test.method+" "+test.path, func(t *testing.T) {
 			request, err := http.NewRequest(test.method, web.URL+test.path, nil)
