@@ -191,7 +191,7 @@ func OpenStore(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) initialize(ctx context.Context) error {
-	const schemaVersion = 6
+	const schemaVersion = 7
 	var version int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read database schema version: %w", err)
@@ -253,7 +253,48 @@ CREATE INDEX IF NOT EXISTS github_trigger_requests_reconciliation ON github_trig
 			return fmt.Errorf("upgrade database schema to version 6: %w", err)
 		}
 	}
+	if version < 7 {
+		if err := s.upgradeToVersionSeven(ctx); err != nil {
+			return fmt.Errorf("upgrade database schema to version 7: %w", err)
+		}
+	}
 	return nil
+}
+
+// upgradeToVersionSeven adds append-only rewind lineage to workflow attempts.
+// Existing attempts keep NULL lineage; rewind treats them as earlier attempts.
+func (s *Store) upgradeToVersionSeven(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, alteration := range []struct {
+		column string
+		sql    string
+	}{
+		{column: "attempt", sql: `ALTER TABLE workflow_attempts ADD COLUMN attempt INTEGER`},
+		{column: "previous_run_id", sql: `ALTER TABLE workflow_attempts ADD COLUMN previous_run_id TEXT`},
+		{column: "reason", sql: `ALTER TABLE workflow_attempts ADD COLUMN reason TEXT CHECK(reason IS NULL OR reason IN ('rewind','loop','retry'))`},
+	} {
+		var present int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('workflow_attempts') WHERE name=?`, alteration.column).Scan(&present); err != nil {
+			return err
+		}
+		if present == 0 {
+			if _, err := tx.ExecContext(ctx, alteration.sql); err != nil {
+				return err
+			}
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS workflow_loop_counters (job_id TEXT, edge TEXT, count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(job_id,edge));
+PRAGMA user_version=7;`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) upgradeToVersionSix(ctx context.Context) error {
