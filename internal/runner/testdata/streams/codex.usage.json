@@ -1,0 +1,7 @@
+{
+  "model": "gpt-5",
+  "input_tokens": 40,
+  "output_tokens": 3,
+  "cached_input_tokens": 35,
+  "reasoning_tokens": 2
+}

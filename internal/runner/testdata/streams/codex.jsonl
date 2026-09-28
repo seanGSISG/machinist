@@ -1,0 +1,2 @@
+{"type":"item.completed","item":{"type":"agent_message","text":"done"}}
+{"type":"turn.completed","model":"gpt-5","usage":{"input_tokens":40,"cached_input_tokens":35,"output_tokens":3,"reasoning_tokens":2}}

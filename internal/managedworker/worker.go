@@ -235,6 +235,10 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 	if result.ID != "" {
 		completion.State = string(result.State)
 		completion.ExitCode = result.ExitCode
+		completion.Usage = result.Usage
+		if completion.Usage != nil && completion.Usage.Model == "" {
+			completion.Usage.Model = spec.Model
+		}
 		completion.Result, _ = os.ReadFile(filepath.Join(filepath.Dir(result.EventsPath), "result.json"))
 		if events, readErr := os.ReadFile(result.EventsPath); readErr == nil {
 			completion.Events = string(events)
