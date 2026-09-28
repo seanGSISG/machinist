@@ -172,6 +172,15 @@ func completeWorkflow(ctx context.Context, tx *sql.Tx, job, run string, c protoc
 	if _, err = tx.ExecContext(ctx, `UPDATE workflow_attempts SET outcome=?,summary=? WHERE run_id=?`, state, summary, run); err != nil {
 		return true, err
 	}
+	if state == "blocked" {
+		looped, err := loopBlockedWorkflow(ctx, tx, job, repository, plan, index, now)
+		if err != nil {
+			return true, err
+		}
+		if looped {
+			return true, nil
+		}
+	}
 	if state == "complete" {
 		var steps []config.WorkflowStep
 		if err = json.Unmarshal([]byte(plan), &steps); err != nil {
