@@ -73,7 +73,8 @@ type LoginSessionReport struct {
 
 // AuthSyncResponse carries pending login actions for the worker.
 type AuthSyncResponse struct {
-	Actions []LoginAction `json:"actions,omitempty"`
+	Actions   []LoginAction        `json:"actions,omitempty"`
+	RecheckAt map[string]time.Time `json:"recheck_at,omitempty"`
 }
 
 // LoginAction names an executor, never a command: the worker runs only the

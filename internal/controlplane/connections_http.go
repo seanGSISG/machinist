@@ -163,9 +163,12 @@ func (s *Server) authSync(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, errors.New("worker instance_id and name are required"))
 		return
 	}
-	if err := s.store.RecordExecutorAuth(request.Context(), input); err != nil {
+	recheckAt, err := s.store.recordExecutorAuth(request.Context(), input)
+	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(response, http.StatusOK, protocol.AuthSyncResponse{Actions: s.logins.sync(input.InstanceID, input.Sessions, input.Active)})
+	writeJSON(response, http.StatusOK, protocol.AuthSyncResponse{
+		Actions: s.logins.sync(input.InstanceID, input.Sessions, input.Active), RecheckAt: recheckAt,
+	})
 }
