@@ -134,8 +134,22 @@ func (a *authAgent) sync(ctx context.Context) {
 	}
 	a.lastError = ""
 	a.delivered(versions)
+	a.scheduleRechecks(response.RecheckAt)
 	for _, action := range response.Actions {
 		a.handle(ctx, action)
+	}
+}
+
+func (a *authAgent) scheduleRechecks(recheckAt map[string]time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for name, deadline := range recheckAt {
+		if _, ok := a.recipes[name]; !ok {
+			continue
+		}
+		if current := a.nextCheck[name]; current.IsZero() || deadline.Before(current) {
+			a.nextCheck[name] = deadline
+		}
 	}
 }
 

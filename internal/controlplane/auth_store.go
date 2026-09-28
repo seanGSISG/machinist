@@ -40,9 +40,14 @@ type ExecutorAuthStatus struct {
 
 // RecordExecutorAuth replaces the auth states a worker instance reported.
 func (s *Store) RecordExecutorAuth(ctx context.Context, request protocol.AuthSyncRequest) error {
+	_, err := s.recordExecutorAuth(ctx, request)
+	return err
+}
+
+func (s *Store) recordExecutorAuth(ctx context.Context, request protocol.AuthSyncRequest) (map[string]time.Time, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 	nowTime := s.now().UTC()
@@ -50,15 +55,16 @@ func (s *Store) RecordExecutorAuth(ctx context.Context, request protocol.AuthSyn
 	// Register the instance without touching last_seen_at: only run polls and
 	// heartbeats decide whether a worker is available for work.
 	if _, err := tx.ExecContext(ctx, `INSERT INTO workers(instance_id,name,last_seen_at) VALUES(?,?,?) ON CONFLICT(instance_id) DO UPDATE SET name=excluded.name`, request.InstanceID, request.Name, now); err != nil {
-		return fmt.Errorf("register worker: %w", err)
+		return nil, fmt.Errorf("register worker: %w", err)
 	}
 	previous, err := previousExecutorAuth(ctx, tx, request.InstanceID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM worker_executor_auth WHERE worker_instance=?`, request.InstanceID); err != nil {
-		return fmt.Errorf("clear executor auth: %w", err)
+		return nil, fmt.Errorf("clear executor auth: %w", err)
 	}
+	recheckAt := map[string]time.Time{}
 	for _, executor := range slices.Sorted(maps.Keys(request.Executors)) {
 		report := request.Executors[executor]
 		prior, existed := previous[executor]
@@ -75,7 +81,11 @@ func (s *Store) RecordExecutorAuth(ctx context.Context, request protocol.AuthSyn
 			if priorState == "" && report.State == protocol.AuthExpired {
 				result.LoggedOut = true
 			}
-			after, _ = fsm.Observe(result, nowTime)
+			var deadline time.Time
+			after, deadline = fsm.Observe(result, nowTime)
+			if !deadline.IsZero() {
+				recheckAt[executor] = deadline
+			}
 			state = storedAuthState(after, report.State)
 		} else if observation {
 			state = priorState
@@ -87,16 +97,19 @@ func (s *Store) RecordExecutorAuth(ctx context.Context, request protocol.AuthSyn
 				Type: "auth_change", SubjectKind: "executor", SubjectID: request.Name + "/" + executor,
 				Cause: "auth_check", Payload: map[string]string{"from": before, "to": after}, CreatedAt: nowTime,
 			}); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		detail := truncateUTF8(report.Detail, maxAuthDetailBytes)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO worker_executor_auth(worker_instance,executor,login,login_timeout_ms,state,detail,checked_at,expires_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
 			request.InstanceID, executor, report.Login, max(report.LoginTimeout, 0), state, detail, optionalTime(report.CheckedAt), optionalTime(report.ExpiresAt), now); err != nil {
-			return fmt.Errorf("store executor auth: %w", err)
+			return nil, fmt.Errorf("store executor auth: %w", err)
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return recheckAt, nil
 }
 
 type storedExecutorAuth struct {

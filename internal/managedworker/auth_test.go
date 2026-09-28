@@ -84,8 +84,17 @@ func TestConnectFromTheWebAPIRunsTheWorkerRecipe(t *testing.T) {
 		return nil
 	}
 	connection := func() map[string]any { return connectionFor("fake") }
-	eventually(t, "status check reports expired", func() bool { c := connection(); return c != nil && c["state"] == "expired" })
-	eventually(t, "shared executor reports expired", func() bool { c := connectionFor("fake-opus"); return c != nil && c["state"] == "expired" })
+	eventually(t, "first failed status check is rechecking", func() bool { c := connection(); return c != nil && c["state"] == "rechecking" })
+	eventually(t, "shared executor first failed status check is rechecking", func() bool {
+		c := connectionFor("fake-opus")
+		return c != nil && c["state"] == "rechecking"
+	})
+	agent.recheckAll()
+	eventually(t, "second failed status check reports expired", func() bool { c := connection(); return c != nil && c["state"] == "expired" })
+	eventually(t, "shared executor second failed status check reports expired", func() bool {
+		c := connectionFor("fake-opus")
+		return c != nil && c["state"] == "expired"
+	})
 
 	var status struct {
 		CSRFToken string `json:"csrf_token"`

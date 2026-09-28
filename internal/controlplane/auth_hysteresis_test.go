@@ -107,8 +107,12 @@ func TestAuthHysteresis(t *testing.T) {
 			request.Executors["claude"] = protocol.ExecutorAuthReport{
 				State: protocol.AuthExpired, Detail: "status check exited with code 1", CheckedAt: &firstFailureAt,
 			}
-			if err := store.RecordExecutorAuth(t.Context(), request); err != nil {
+			rechecks, err := store.recordExecutorAuth(t.Context(), request)
+			if err != nil {
 				t.Fatal(err)
+			}
+			if got := rechecks["claude"]; !got.Equal(now.Add(authRecheckDelay)) {
+				t.Fatalf("recheck deadline = %s, want %s", got, now.Add(authRecheckDelay))
 			}
 			if err := store.RecordExecutorAuth(t.Context(), request); err != nil {
 				t.Fatal(err)
