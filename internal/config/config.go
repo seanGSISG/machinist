@@ -195,6 +195,9 @@ func LoadWorker(path string) (Worker, error) {
 	return applyWorkerDefaults(worker)
 }
 
+// LoadConfig loads the usable portion of a control plane configuration. Invalid
+// command and workflow entries are excluded; use ValidateFile when their
+// diagnostics are needed.
 func LoadConfig(path string) (Config, error) {
 	if path == "" {
 		defaultPath, err := defaultConfigPath("config.toml")
@@ -370,13 +373,6 @@ func (c Config) ResolveCommand(name string) (ResolvedCommand, error) {
 // ValidateFile when diagnostics for excluded entries are required.
 func LoadDefinitions(path string) (Config, error) {
 	report, err := ValidateFile(path)
-	if err == nil {
-		for _, invalid := range report.InvalidCommands {
-			if invalid.kind == "workflow" {
-				return Config{}, errors.New(invalid.Reason)
-			}
-		}
-	}
 	return report.Config, err
 }
 

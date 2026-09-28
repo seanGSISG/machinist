@@ -16,7 +16,6 @@ import (
 type InvalidCommand struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason"`
-	kind   string
 }
 
 // Report is the usable portion of a configuration and any entries that were
@@ -97,13 +96,13 @@ func ValidateFile(path string) (Report, error) {
 		entryDecoder := toml.NewDecoder(bytes.NewReader(rawEntry))
 		entryDecoder.DisallowUnknownFields()
 		if err := entryDecoder.Decode(&command); err != nil {
-			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, "command", name, entryOffsets[entryKey("commands", name)], err))
+			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, name, entryOffsets[entryKey("commands", name)], err))
 			continue
 		}
 		report.Config.Commands[name] = command
 		if _, err := report.Config.ResolveCommand(name); err != nil {
 			delete(report.Config.Commands, name)
-			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, "command", name, entryOffsets[entryKey("commands", name)], err))
+			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, name, entryOffsets[entryKey("commands", name)], err))
 		}
 	}
 	for _, name := range sortedMapKeys(sections.Workflows) {
@@ -112,19 +111,19 @@ func ValidateFile(path string) (Report, error) {
 		entryDecoder := toml.NewDecoder(bytes.NewReader(rawEntry))
 		entryDecoder.DisallowUnknownFields()
 		if err := entryDecoder.Decode(&workflow); err != nil {
-			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, "workflow", name, entryOffsets[entryKey("workflows", name)], err))
+			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, name, entryOffsets[entryKey("workflows", name)], err))
 			continue
 		}
 		report.Config.Workflows[name] = workflow
 		if _, err := report.Config.ResolveTaskWorkflow(name, ""); err != nil {
 			delete(report.Config.Workflows, name)
-			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, "workflow", name, entryOffsets[entryKey("workflows", name)], err))
+			report.InvalidCommands = append(report.InvalidCommands, invalidEntry(absPath, body, rawEntry, name, entryOffsets[entryKey("workflows", name)], err))
 		}
 	}
 	return report, nil
 }
 
-func invalidEntry(path string, body []byte, rawEntry unstable.RawMessage, kind, name string, tableOffset int, err error) InvalidCommand {
+func invalidEntry(path string, body []byte, rawEntry unstable.RawMessage, name string, tableOffset int, err error) InvalidCommand {
 	line, column := entryStart(body, rawEntry, tableOffset)
 	var decodeErr *toml.DecodeError
 	if errors.As(err, &decodeErr) {
@@ -133,7 +132,7 @@ func invalidEntry(path string, body []byte, rawEntry unstable.RawMessage, kind, 
 		column = localColumn
 	}
 	message := strings.TrimPrefix(err.Error(), "toml: ")
-	return InvalidCommand{Name: name, Reason: fmt.Sprintf("%s:%d:%d: %s", path, line, column, message), kind: kind}
+	return InvalidCommand{Name: name, Reason: fmt.Sprintf("%s:%d:%d: %s", path, line, column, message)}
 }
 
 func entryStart(body []byte, rawEntry unstable.RawMessage, tableOffset int) (int, int) {
