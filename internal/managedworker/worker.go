@@ -27,6 +27,7 @@ type Worker struct {
 	stdout         io.Writer
 	stderr         io.Writer
 	heartbeatTicks <-chan time.Time
+	logTicks       <-chan time.Time
 	executeRun     func(context.Context, protocol.RunSpec) protocol.Completion
 	auth           *authAgent
 }
@@ -220,6 +221,17 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		completion.Error = err.Error()
 		return completion
 	}
+	logRing := runner.NewLogRing(0)
+	stopLogShip := make(chan struct{})
+	logShipDone := make(chan struct{})
+	go func() {
+		defer close(logShipDone)
+		w.shipLogs(ctx, spec, logRing, stopLogShip)
+	}()
+	defer func() {
+		close(stopLogShip)
+		<-logShipDone
+	}()
 	result, runErr := runner.Execute(ctx, runner.Options{
 		Revision: spec.Revision,
 		Workflow: spec.Workflow, JobID: spec.JobID,
@@ -231,6 +243,7 @@ func (w *Worker) execute(ctx context.Context, spec protocol.RunSpec) protocol.Co
 		DataDirectory: w.config.DataDirectory,
 		Stdout:        w.stdout,
 		Stderr:        w.stderr,
+		Log:           logRing,
 	})
 	if result.ID != "" {
 		completion.State = string(result.State)

@@ -53,6 +53,7 @@ type Options struct {
 	// RateLimitBackoff is the previous estimated rate-limit backoff for this
 	// command; it seeds the doubling estimate when no reset time is reported.
 	RateLimitBackoff time.Duration
+	Log              *LogRing
 }
 
 type Result struct {
@@ -278,9 +279,16 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	}
 	stdoutTail := newTailBuffer(rateLimitTailBytes)
 	stderrTail := newTailBuffer(rateLimitTailBytes)
-	stdoutDestination := io.MultiWriter(options.Stdout, usageCollector, stdoutTail)
+	stdoutWriters := []io.Writer{options.Stdout, usageCollector, stdoutTail}
+	stderrWriters := []io.Writer{options.Stderr, stderrTail}
+	if options.Log != nil {
+		stdoutWriters = append(stdoutWriters, options.Log)
+		stderrWriters = append(stderrWriters, options.Log)
+	}
+	stdoutDestination := io.MultiWriter(stdoutWriters...)
+	stderrDestination := io.MultiWriter(stderrWriters...)
 	go pumpStream(&streams, stdoutReader, stdoutDestination, "stdout", log, streamErrors)
-	go pumpStream(&streams, stderrReader, io.MultiWriter(options.Stderr, stderrTail), "stderr", log, streamErrors)
+	go pumpStream(&streams, stderrReader, stderrDestination, "stderr", log, streamErrors)
 	streamsDone := make(chan struct{})
 	go func() {
 		streams.Wait()
