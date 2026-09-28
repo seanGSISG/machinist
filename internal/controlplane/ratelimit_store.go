@@ -16,7 +16,9 @@ const (
 
 // parkRateLimitedExecutor records the stall and returns the same run to the
 // queue. Reusing the run preserves the workflow attempt: rate limits are an
-// infrastructure retry, not an outcome of the attempt.
+// infrastructure retry, not an outcome of the attempt. The rate-limit fields
+// remain on the run so clients can explain why it was requeued; other terminal
+// completion fields are cleared before it can be leased again.
 func (s *Store) parkRateLimitedExecutor(ctx context.Context, tx *sql.Tx, runID, jobID, worker, executor string, completion protocol.Completion, now time.Time) error {
 	until, backoff, err := rateLimitReset(ctx, tx, worker, executor, completion.ResetAt, now)
 	if err != nil {
@@ -29,7 +31,7 @@ ON CONFLICT(worker,executor) DO UPDATE SET unavailable_until=excluded.unavailabl
 		worker, executor, formattedUntil, int64(backoff/time.Second), nullableText(completion.ResetSource), formattedNow); err != nil {
 		return fmt.Errorf("park rate-limited executor: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state='queued',worker_instance=NULL,worker_name='',lease_token=NULL,lease_expires_at=NULL,started_at=NULL WHERE id=?`, runID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state='queued',worker_instance=NULL,worker_name='',lease_token=NULL,lease_expires_at=NULL,started_at=NULL,exit_code=NULL,error=NULL,result=NULL,events=NULL,completed_at=NULL,duration_millis=NULL,token_usage=NULL WHERE id=?`, runID); err != nil {
 		return fmt.Errorf("requeue rate-limited run: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='queued',updated_at=? WHERE id=?`, formattedNow, jobID); err != nil {
@@ -92,8 +94,23 @@ func skipRateLimitedExecutors(ctx context.Context, tx *sql.Tx, worker string, ex
 // endExpiredRateLimit clears a stall only after its executor has successfully
 // leased work. RowsAffected makes the end event exactly once.
 func (s *Store) endExpiredRateLimit(ctx context.Context, tx *sql.Tx, worker, executor string, now time.Time) error {
+	var value string
+	err := tx.QueryRowContext(ctx, `SELECT unavailable_until FROM executor_state WHERE worker=? AND executor=? AND unavailable_until IS NOT NULL`, worker, executor).Scan(&value)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read expired executor rate limit: %w", err)
+	}
+	until, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return fmt.Errorf("parse rate limit for %s/%s: %w", worker, executor, err)
+	}
+	if until.After(now) {
+		return nil
+	}
 	formattedNow := now.UTC().Format(time.RFC3339Nano)
-	result, err := tx.ExecContext(ctx, `UPDATE executor_state SET unavailable_until=NULL,updated_at=? WHERE worker=? AND executor=? AND unavailable_until IS NOT NULL AND unavailable_until<=?`, formattedNow, worker, executor, formattedNow)
+	result, err := tx.ExecContext(ctx, `UPDATE executor_state SET unavailable_until=NULL,backoff_seconds=0,updated_at=? WHERE worker=? AND executor=? AND unavailable_until=?`, formattedNow, worker, executor, value)
 	if err != nil {
 		return fmt.Errorf("clear expired executor rate limit: %w", err)
 	}

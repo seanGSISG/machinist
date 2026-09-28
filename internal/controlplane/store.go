@@ -166,7 +166,11 @@ func OpenStore(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
-	db, err := sql.Open("sqlite", path+"?_txlock=immediate")
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	db, err := sql.Open("sqlite", path+separator+"_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -1049,6 +1053,9 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 	if !terminalRunState(completion.State) {
 		return fmt.Errorf("%w: invalid terminal run state %q", ErrInvalidCompletion, completion.State)
 	}
+	if completion.FailureClass == "rate_limited" && completion.State != "failed" {
+		return fmt.Errorf("%w: rate-limited completion must be failed", ErrInvalidCompletion)
+	}
 	if err := validateOutcome(completion.State, completion.ExitCode); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidCompletion, err)
 	}
@@ -1061,14 +1068,14 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,failure_class=?,reset_at=?,reset_source=?,lease_expires_at=NULL,completed_at=?,duration_millis=?,token_usage=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, nullableText(completion.FailureClass), optionalTime(completion.ResetAt), nullableText(completion.ResetSource), now, durationMillis, tokenUsage, runID); err != nil {
 		return err
 	}
-	if err := s.writeRunUsage(ctx, tx, runID, completion.Usage, completedAt); err != nil {
-		return fmt.Errorf("write run usage: %w", err)
-	}
 	if completion.FailureClass == "rate_limited" {
 		if err := s.parkRateLimitedExecutor(ctx, tx, runID, jobID, workerName, executor, completion, completedAt); err != nil {
 			return err
 		}
 		return tx.Commit()
+	}
+	if err := s.writeRunUsage(ctx, tx, runID, completion.Usage, completedAt); err != nil {
+		return fmt.Errorf("write run usage: %w", err)
 	}
 	if handled, err := completeWorkflow(ctx, tx, jobID, runID, completion, now); handled || err != nil {
 		if err != nil {
