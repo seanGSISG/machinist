@@ -28,6 +28,8 @@ func TestClassifyRateLimit(t *testing.T) {
 		{fixture: "codex_absolute.jsonl", limited: true, source: RateLimitSourceRegex, resetAt: time.Date(2026, time.October, 3, 16, 14, 0, 0, time.UTC)},
 		{fixture: "codex_clock.txt", limited: true, source: RateLimitSourceRegex, resetAt: time.Date(2026, time.September, 28, 8, 25, 0, 0, time.UTC)},
 		{fixture: "codex_insufficient_quota.txt", limited: true, source: RateLimitSourceEstimate, resetAt: now.Add(time.Minute), backoff: time.Minute},
+		{fixture: "codex_at_capacity.jsonl", limited: true, source: RateLimitSourceEstimate, resetAt: now.Add(time.Minute), backoff: time.Minute},
+		{fixture: "claude_overloaded.jsonl", limited: true, source: RateLimitSourceEstimate, resetAt: now.Add(time.Minute), backoff: time.Minute},
 		{fixture: "gemini_retrydelay.jsonl", limited: true, source: RateLimitSourceStructured, resetAt: now.Add(32 * time.Second)},
 		{fixture: "gemini_text.txt", limited: true, source: RateLimitSourceRegex, resetAt: now.Add(90*time.Second + 500*time.Millisecond)},
 		{fixture: "gemini_reset_after.txt", limited: true, source: RateLimitSourceRegex, resetAt: now.Add(2*time.Hour + time.Minute + 3*time.Second)},
@@ -36,6 +38,7 @@ func TestClassifyRateLimit(t *testing.T) {
 		{fixture: "failure_compile.txt"},
 		{fixture: "failure_tool_output.jsonl"},
 		{fixture: "failure_codex_stream.jsonl"},
+		{fixture: "failure_overload_discussion.jsonl"},
 	}
 	entries, err := os.ReadDir(filepath.Join("testdata", "ratelimit"))
 	if err != nil {
@@ -65,6 +68,24 @@ func TestClassifyRateLimit(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("capacity and overload phrasings", func(t *testing.T) {
+		for _, line := range []string{
+			`{"type":"error","message":"Selected model is at capacity. Please try a different model."}`,
+			`{"type":"turn.failed","error":{"message":"The model is currently overloaded with other requests."}}`,
+			`{"type":"error","message":"The model is overloaded. Please retry."}`,
+			`{"type":"error","message":"server_is_overloaded"}`,
+			`{"type":"error","message":"slow_down: too many requests"}`,
+			`{"type":"result","is_error":true,"result":"API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"}`,
+			`API Error: 529 Overloaded`,
+			`{"type":"result","is_error":true,"result":"{\"type\":\"overloaded\"}"}`,
+		} {
+			got, ok := Classify([][]byte{[]byte(line)}, 1, now, 0)
+			if !ok || got.Source != RateLimitSourceEstimate || got.Backoff != time.Minute {
+				t.Fatalf("Classify(%s) = %+v, %v; want estimate", line, got, ok)
+			}
+		}
+	})
 
 	t.Run("estimate backoff", func(t *testing.T) {
 		lines := readRateLimitFixture(t, "claude_credit.jsonl")
