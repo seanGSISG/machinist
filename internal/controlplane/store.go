@@ -166,7 +166,7 @@ func OpenStore(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
@@ -934,6 +934,9 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	for executor := range expired {
 		delete(executors, executor)
 	}
+	if err := skipRateLimitedExecutors(ctx, tx, request.Name, executors, nowTime); err != nil {
+		return nil, err
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT r.id,r.job_id,r.command,r.command_hash,r.executor,r.model,r.repository,r.rendered_prompt,r.timeout_ms,j.state,COALESCE((SELECT plan FROM workflow_jobs WHERE job_id=j.id),'') FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.state='queued' AND (NOT EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=j.id) OR (? AND EXISTS(SELECT 1 FROM workflow_jobs w WHERE w.job_id=j.id AND (w.worker_name='' OR w.worker_name=?)))) AND (? OR NOT EXISTS(SELECT 1 FROM task_inputs t WHERE t.job_id=j.id)) AND (? OR NOT EXISTS(SELECT 1 FROM execution_reviews er WHERE er.run_id=r.id)) ORDER BY r.rowid`, request.Workflows, request.Name, request.Artifacts, request.Reviews)
 	if err != nil {
 		return nil, err
@@ -1002,6 +1005,9 @@ func (s *Store) poll(ctx context.Context, request protocol.PollRequest, maxConcu
 	if err != nil || changed != 1 {
 		return nil, fmt.Errorf("lease run: concurrent state change")
 	}
+	if err := s.endExpiredRateLimit(ctx, tx, request.Name, selected.Executor, nowTime); err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET state='running',updated_at=? WHERE id=? AND state='queued'`, now, selected.JobID); err != nil {
 		return nil, err
 	}
@@ -1023,9 +1029,9 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 		return err
 	}
 	defer tx.Rollback()
-	var jobID, state, instanceID, leaseToken, startedAt, triggerIdentity, triggerGeneration string
+	var jobID, state, instanceID, leaseToken, startedAt, triggerIdentity, triggerGeneration, executor, workerName string
 	var leaseExpiresAt sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT r.job_id,r.state,COALESCE(r.worker_instance,''),COALESCE(r.lease_token,''),r.lease_expires_at,COALESCE(r.started_at,''),COALESCE(j.trigger_identity,''),COALESCE(j.trigger_generation_id,'') FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.id=?`, runID).Scan(&jobID, &state, &instanceID, &leaseToken, &leaseExpiresAt, &startedAt, &triggerIdentity, &triggerGeneration); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT r.job_id,r.state,COALESCE(r.worker_instance,''),COALESCE(r.lease_token,''),r.lease_expires_at,COALESCE(r.started_at,''),COALESCE(j.trigger_identity,''),COALESCE(j.trigger_generation_id,''),r.executor,r.worker_name FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.id=?`, runID).Scan(&jobID, &state, &instanceID, &leaseToken, &leaseExpiresAt, &startedAt, &triggerIdentity, &triggerGeneration, &executor, &workerName); err != nil {
 		return err
 	}
 	if subtle.ConstantTimeCompare([]byte(instanceID), []byte(completion.InstanceID)) != 1 || subtle.ConstantTimeCompare([]byte(leaseToken), []byte(completion.LeaseToken)) != 1 {
@@ -1052,11 +1058,17 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 	if durationMillis == nil {
 		durationMillis = elapsedMillis(startedAt, now)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,lease_expires_at=NULL,completed_at=?,duration_millis=?,token_usage=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, now, durationMillis, tokenUsage, runID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,failure_class=?,reset_at=?,reset_source=?,lease_expires_at=NULL,completed_at=?,duration_millis=?,token_usage=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, nullableText(completion.FailureClass), optionalTime(completion.ResetAt), nullableText(completion.ResetSource), now, durationMillis, tokenUsage, runID); err != nil {
 		return err
 	}
 	if err := s.writeRunUsage(ctx, tx, runID, completion.Usage, completedAt); err != nil {
 		return fmt.Errorf("write run usage: %w", err)
+	}
+	if completion.FailureClass == "rate_limited" {
+		if err := s.parkRateLimitedExecutor(ctx, tx, runID, jobID, workerName, executor, completion, completedAt); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
 	if handled, err := completeWorkflow(ctx, tx, jobID, runID, completion, now); handled || err != nil {
 		if err != nil {
