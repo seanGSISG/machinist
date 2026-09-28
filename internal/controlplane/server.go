@@ -368,6 +368,7 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
+	gates, blocked, logins := deriveAttention(request, jobs, connections)
 	writeJSON(response, http.StatusOK, StatusResponse{
 		SchemaVersion:         statusSchemaVersion,
 		GeneratedAt:           now,
@@ -379,9 +380,9 @@ func (s *Server) status(response http.ResponseWriter, request *http.Request) {
 		Workflows:             definition.WorkflowNames(),
 		Repositories:          repositories,
 		Executors:             []ExecutorStatus{},
-		GatesAwaitingApproval: []StatusItem{},
-		BlockedJobs:           []StatusItem{},
-		Logins:                []StatusItem{},
+		GatesAwaitingApproval: gates,
+		BlockedJobs:           blocked,
+		Logins:                logins,
 		CSRFToken:             s.csrfToken,
 	})
 }

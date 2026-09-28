@@ -7,6 +7,8 @@ import "time"
 type JobSummary struct {
 	Task             *TaskSummary      `json:"task,omitempty"`
 	Workflow         *WorkflowProgress `json:"workflow,omitempty"`
+	AttentionReason  *string           `json:"attention_reason"`
+	WaitingSince     *time.Time        `json:"waiting_since"`
 	Labels           map[string]string `json:"labels"`
 	Superseded       bool              `json:"superseded"`
 	ID               string            `json:"id"`
@@ -49,6 +51,7 @@ func newJobSummary(job Job) JobSummary {
 	if summary.Runs == nil {
 		summary.Runs = []Run{}
 	}
+	applyJobAttention(&summary)
 	return summary
 }
 
