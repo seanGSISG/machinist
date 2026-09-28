@@ -77,5 +77,12 @@ func TestPerEntryValidation(t *testing.T) {
 		if got := report.InvalidCommands[1]; got.Name != "missing_command" || !strings.Contains(got.Reason, path+":8:1:") {
 			t.Fatalf("invalid workflow = %#v", got)
 		}
+		loaded, err := LoadDefinitions(path)
+		if err != nil {
+			t.Fatalf("LoadDefinitions rejected usable configuration: %v", err)
+		}
+		if len(loaded.Commands) != 1 || len(loaded.Workflows) != 0 {
+			t.Fatalf("LoadDefinitions = commands %#v, workflows %#v", loaded.Commands, loaded.Workflows)
+		}
 	})
 }

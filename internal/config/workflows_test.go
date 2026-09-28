@@ -25,13 +25,17 @@ func TestWorkflowConfiguration(t *testing.T) {
 			if err := os.WriteFile(path, []byte(text), 0600); err != nil {
 				t.Fatal(err)
 			}
-			c, err := LoadDefinitions(path)
 			if !test.valid {
-				if err == nil {
-					t.Fatal("expected invalid workflow")
+				report, err := ValidateFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := report.Config.Workflows["deliver"]; ok || len(report.InvalidCommands) != 1 || report.InvalidCommands[0].Name != "deliver" {
+					t.Fatalf("invalid workflow report = %#v", report)
 				}
 				return
 			}
+			c, err := LoadDefinitions(path)
 			if err != nil {
 				t.Fatal(err)
 			}
