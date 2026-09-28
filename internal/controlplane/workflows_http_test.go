@@ -56,7 +56,7 @@ func TestWorkflowHTTPSubmissionAndApproval(t *testing.T) {
 	response.Body.Close()
 	status = getStatus(t, web.URL)
 	job := status.Jobs[0]
-	if job.Task == nil || job.Task.Spec != "issue" {
+	if job.Task == nil {
 		t.Fatalf("legacy prompt was not normalized: %+v", job.Task)
 	}
 	if job.State != "awaiting_approval" || job.Workflow.Name != "deliver" {

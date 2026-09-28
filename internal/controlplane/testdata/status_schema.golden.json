@@ -1,0 +1,81 @@
+{
+  "job_detail": {
+    "command": "plan",
+    "created_at": "2026-09-27T12:00:00Z",
+    "id": "job_golden",
+    "prompt": "golden prompt",
+    "repository": "machinist",
+    "runs": [
+      {
+        "command": "plan",
+        "completed_at": "0001-01-01T00:00:00Z",
+        "executor": "test",
+        "failure_class": null,
+        "id": "run_golden",
+        "model": "model",
+        "reset_at": null,
+        "reset_source": null,
+        "started_at": "0001-01-01T00:00:00Z",
+        "state": "queued"
+      }
+    ],
+    "state": "running",
+    "updated_at": "2026-09-27T12:00:00Z"
+  },
+  "run_detail": {
+    "command": "plan",
+    "completed_at": "0001-01-01T00:00:00Z",
+    "events": "event\n",
+    "executor": "test",
+    "failure_class": null,
+    "id": "run_golden",
+    "job_id": "job_golden",
+    "model": "model",
+    "rendered_prompt": "rendered secret",
+    "reset_at": null,
+    "reset_source": null,
+    "result": {
+      "answer": 42
+    },
+    "started_at": "0001-01-01T00:00:00Z",
+    "state": "queued"
+  },
+  "status": {
+    "blocked_jobs": [],
+    "commands": [
+      "plan"
+    ],
+    "connections": [],
+    "csrf_token": "\u003ccsrf\u003e",
+    "executors": [],
+    "gates_awaiting_approval": [],
+    "generated_at": "2026-09-27T12:00:00Z",
+    "jobs": [
+      {
+        "command": "plan",
+        "created_at": "2026-09-27T12:00:00Z",
+        "id": "job_golden",
+        "repository": "machinist",
+        "runs": [
+          {
+            "command": "plan",
+            "completed_at": "0001-01-01T00:00:00Z",
+            "executor": "test",
+            "id": "run_golden",
+            "model": "model",
+            "started_at": "0001-01-01T00:00:00Z",
+            "state": "queued"
+          }
+        ],
+        "state": "running",
+        "updated_at": "2026-09-27T12:00:00Z"
+      }
+    ],
+    "logins": [],
+    "repositories": [],
+    "schema_version": 1,
+    "triggers": [],
+    "workers": [],
+    "workflows": []
+  }
+}
