@@ -1,0 +1,2 @@
+{"wrapper":"agent-run --contract"}
+{"type":"turn.completed","model":"gpt-5-codex","usage":{"input_tokens":12,"cached_input_tokens":5,"output_tokens":8}}

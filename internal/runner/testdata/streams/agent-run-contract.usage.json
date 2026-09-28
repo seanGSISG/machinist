@@ -1,0 +1,6 @@
+{
+  "model": "gpt-5-codex",
+  "input_tokens": 12,
+  "output_tokens": 8,
+  "cached_input_tokens": 5
+}

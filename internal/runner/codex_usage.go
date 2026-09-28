@@ -1,13 +1,15 @@
 package runner
 
 import (
-	"bytes"
 	"encoding/json"
-	"math"
+	"io"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
+
+	"github.com/owainlewis/machinist/internal/protocol"
 )
 
 const (
@@ -17,11 +19,15 @@ const (
 )
 
 type structuredUsageCollector struct {
-	buffer       []byte
-	discarding   bool
-	usage        *int64
 	resultType   string
 	cache        bool
+	start        sync.Once
+	close        sync.Once
+	writer       *io.PipeWriter
+	done         chan struct{}
+	mu           sync.Mutex
+	usage        *protocol.Usage
+	recognized   bool
 	finalMessage string
 }
 
@@ -436,32 +442,23 @@ func executableName(command string) string {
 }
 
 func (collector *structuredUsageCollector) Write(data []byte) (int, error) {
-	remaining := data
-	for len(remaining) > 0 {
-		newline := bytes.IndexByte(remaining, '\n')
-		if newline < 0 {
-			collector.appendFragment(remaining)
-			break
-		}
-		collector.appendFragment(remaining[:newline])
-		collector.completeLine()
-		remaining = remaining[newline+1:]
-	}
-	return len(data), nil
+	collector.startReader()
+	return collector.writer.Write(data)
 }
 
 func (collector *structuredUsageCollector) flush() {
-	if !collector.discarding && len(collector.buffer) > 0 {
-		collector.parseLine(collector.buffer)
-		collector.buffer = nil
-	}
+	collector.startReader()
+	collector.close.Do(func() { _ = collector.writer.Close() })
+	<-collector.done
 }
 
 // lastMessage returns the agent's final message: the last Codex agent_message
 // item or the Claude result text.
 func (collector *structuredUsageCollector) lastMessage() string {
 	collector.flush()
+	collector.mu.Lock()
 	message := strings.TrimSpace(collector.finalMessage)
+	collector.mu.Unlock()
 	if len(message) <= maxFinalMessageBytes {
 		return message
 	}
@@ -474,50 +471,61 @@ func (collector *structuredUsageCollector) lastMessage() string {
 
 func (collector *structuredUsageCollector) tokenUsage() *int64 {
 	collector.flush()
+	collector.mu.Lock()
+	defer collector.mu.Unlock()
 	if collector.usage == nil {
 		return nil
 	}
-	value := *collector.usage
+	value, ok := addUsage(collector.usage.InputTokens, collector.usage.OutputTokens)
+	if !ok {
+		return nil
+	}
 	return &value
 }
 
-func (collector *structuredUsageCollector) appendFragment(fragment []byte) {
-	if collector.discarding {
-		return
+func (collector *structuredUsageCollector) structuredUsage() (*protocol.Usage, bool) {
+	collector.flush()
+	collector.mu.Lock()
+	defer collector.mu.Unlock()
+	if collector.usage == nil {
+		return nil, collector.recognized
 	}
-	if len(fragment) > maxStructuredEventBytes-len(collector.buffer) {
-		remainingCapacity := maxStructuredEventBytes - len(collector.buffer)
-		collector.buffer = append(collector.buffer, fragment[:remainingCapacity]...)
-		if isUsageResultCandidate(collector.buffer, collector.resultType) {
-			collector.usage = nil
-		}
-		collector.buffer = nil
-		collector.discarding = true
-		return
-	}
-	collector.buffer = append(collector.buffer, fragment...)
+	usage := *collector.usage
+	return &usage, true
 }
 
-func (collector *structuredUsageCollector) completeLine() {
-	if !collector.discarding {
-		collector.parseLine(collector.buffer)
-	}
-	collector.buffer = collector.buffer[:0]
-	collector.discarding = false
+func (collector *structuredUsageCollector) startReader() {
+	collector.start.Do(func() {
+		reader, writer := io.Pipe()
+		collector.writer = writer
+		collector.done = make(chan struct{})
+		go func() {
+			defer close(collector.done)
+			defer reader.Close()
+			for line, err := range LineReader(reader, maxStructuredEventBytes) {
+				if err != nil {
+					return
+				}
+				collector.parseLine(line.Data, line.Truncated)
+			}
+		}()
+	})
 }
 
-func (collector *structuredUsageCollector) parseLine(line []byte) {
+func (collector *structuredUsageCollector) parseLine(line []byte, truncated bool) {
 	var event struct {
-		Type   string          `json:"type"`
-		Usage  json.RawMessage `json:"usage"`
-		Result string          `json:"result"`
+		Type   string `json:"type"`
+		Result string `json:"result"`
 		Item   struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"item"`
 	}
-	if err := json.Unmarshal(line, &event); err != nil {
-		if isUsageResultCandidate(line, collector.resultType) {
+	collector.mu.Lock()
+	defer collector.mu.Unlock()
+	if truncated || json.Unmarshal(line, &event) != nil {
+		if isUsageCandidate(line) {
+			collector.recognized = true
 			collector.usage = nil
 		}
 		return
@@ -525,84 +533,31 @@ func (collector *structuredUsageCollector) parseLine(line []byte) {
 	switch {
 	case event.Type == "item.completed" && event.Item.Type == "agent_message" && event.Item.Text != "":
 		collector.finalMessage = event.Item.Text
-	case collector.cache && event.Type == "result" && event.Result != "":
+	case event.Type == "result" && event.Result != "":
 		collector.finalMessage = event.Result
 	}
-	if event.Type != collector.resultType {
+	if !supportedUsageType(event.Type) {
 		return
 	}
+	collector.recognized = true
+	usage, ok := Detect(line)
 	collector.usage = nil
-	if collector.cache {
-		var usage struct {
-			Input              *int64 `json:"input_tokens"`
-			CacheCreationInput *int64 `json:"cache_creation_input_tokens"`
-			CacheReadInput     *int64 `json:"cache_read_input_tokens"`
-			Output             *int64 `json:"output_tokens"`
-		}
-		if err := json.Unmarshal(event.Usage, &usage); err != nil {
-			return
-		}
-		if usage.Input == nil || usage.CacheCreationInput == nil || usage.CacheReadInput == nil || usage.Output == nil ||
-			*usage.Input < 0 || *usage.CacheCreationInput < 0 || *usage.CacheReadInput < 0 || *usage.Output < 0 {
-			return
-		}
-		total := *usage.Input
-		if total > math.MaxInt64-*usage.CacheCreationInput {
-			return
-		}
-		total += *usage.CacheCreationInput
-		if total > math.MaxInt64-*usage.CacheReadInput {
-			return
-		}
-		total += *usage.CacheReadInput
-		if total > math.MaxInt64-*usage.Output {
-			return
-		}
-		total += *usage.Output
-		collector.usage = &total
-		return
+	if ok {
+		collector.usage = &usage
 	}
-	var usage struct {
-		Input  *int64 `json:"input_tokens"`
-		Output *int64 `json:"output_tokens"`
-	}
-	if err := json.Unmarshal(event.Usage, &usage); err != nil {
-		return
-	}
-	if usage.Input == nil || usage.Output == nil || *usage.Input < 0 || *usage.Output < 0 || *usage.Input > math.MaxInt64-*usage.Output {
-		return
-	}
-	total := *usage.Input + *usage.Output
-	collector.usage = &total
 }
 
-func isUsageResultCandidate(line []byte, resultType string) bool {
-	decoder := json.NewDecoder(bytes.NewReader(line))
-	token, err := decoder.Token()
-	delimiter, ok := token.(json.Delim)
-	if err != nil || !ok || delimiter != '{' {
-		return false
-	}
-	for decoder.More() {
-		token, err = decoder.Token()
-		if err != nil {
-			return false
-		}
-		key, ok := token.(string)
-		if !ok {
-			return false
-		}
-		if key == "type" {
-			token, err = decoder.Token()
-			value, ok := token.(string)
-			return err == nil && ok && value == resultType
-		}
-		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return hasJSONFieldValue(line, "type", resultType)
+func isUsageCandidate(line []byte) bool {
+	for _, eventType := range []string{"result", "message_delta", "turn.completed"} {
+		if hasJSONFieldValue(line, "type", eventType) {
+			return true
 		}
 	}
-	return hasJSONFieldValue(line, "type", resultType)
+	return false
+}
+
+func supportedUsageType(eventType string) bool {
+	return eventType == "result" || eventType == "message_delta" || eventType == "turn.completed"
 }
 
 func hasJSONFieldValue(line []byte, field, want string) bool {

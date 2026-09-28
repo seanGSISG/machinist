@@ -1,0 +1,6 @@
+{
+  "model": "claude-sonnet",
+  "input_tokens": 150,
+  "output_tokens": 4,
+  "cached_input_tokens": 30
+}

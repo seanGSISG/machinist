@@ -65,6 +65,7 @@ type Result struct {
 	CompletedAt    time.Time            `json:"completed_at"`
 	DurationMillis int64                `json:"duration_millis"`
 	TokenUsage     *int64               `json:"token_usage,omitempty"`
+	Usage          *protocol.Usage      `json:"usage,omitempty"`
 	FinalMessage   string               `json:"final_message,omitempty"`
 	EventsPath     string               `json:"events_path"`
 }
@@ -263,10 +264,10 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 	var streams sync.WaitGroup
 	streams.Add(2)
 	usageCollector := newUsageCollector(options.Command.Executor, executorCommand)
-	stdoutDestination := options.Stdout
-	if usageCollector != nil {
-		stdoutDestination = io.MultiWriter(options.Stdout, usageCollector)
+	if usageCollector == nil {
+		usageCollector = &structuredUsageCollector{}
 	}
+	stdoutDestination := io.MultiWriter(options.Stdout, usageCollector)
 	go pumpStream(&streams, stdoutReader, stdoutDestination, "stdout", log, streamErrors)
 	go pumpStream(&streams, stderrReader, options.Stderr, "stderr", log, streamErrors)
 	streamsDone := make(chan struct{})
@@ -292,12 +293,10 @@ func Execute(ctx context.Context, options Options) (result Result, returnErr err
 		}
 	}
 	var collectedTokenUsage *int64
-	collectedTokenUsageIsAuthoritative := usageCollector != nil
-	if usageCollector != nil {
-		collectedTokenUsage = usageCollector.tokenUsage()
-		result.FinalMessage = usageCollector.lastMessage()
-	}
-	if err := finish(&result, log, runDirectory, state, exitCode, outcome, collectedTokenUsage, collectedTokenUsageIsAuthoritative); err != nil {
+	collectedUsage, collectedTokenUsageIsAuthoritative := usageCollector.structuredUsage()
+	collectedTokenUsage = usageCollector.tokenUsage()
+	result.FinalMessage = usageCollector.lastMessage()
+	if err := finish(&result, log, runDirectory, state, exitCode, outcome, collectedTokenUsage, collectedUsage, collectedTokenUsageIsAuthoritative); err != nil {
 		if outcome != nil {
 			return result, &OutcomeError{State: state, ExitCode: exitCode, Cause: errors.Join(outcome, err)}
 		}
@@ -526,13 +525,13 @@ func completeFailure(result *Result, log *eventLog, runDirectory string, outcome
 }
 
 func completeOutcome(result *Result, log *eventLog, runDirectory string, state State, exitCode int, outcome error) (Result, error) {
-	if err := finish(result, log, runDirectory, state, exitCode, outcome, nil, false); err != nil {
+	if err := finish(result, log, runDirectory, state, exitCode, outcome, nil, nil, false); err != nil {
 		outcome = errors.Join(outcome, err)
 	}
 	return *result, &OutcomeError{State: state, ExitCode: exitCode, Cause: outcome}
 }
 
-func finish(result *Result, log *eventLog, runDirectory string, state State, exitCode int, outcome error, collectedTokenUsage *int64, collectedTokenUsageIsAuthoritative bool) error {
+func finish(result *Result, log *eventLog, runDirectory string, state State, exitCode int, outcome error, collectedTokenUsage *int64, collectedUsage *protocol.Usage, collectedTokenUsageIsAuthoritative bool) error {
 	message := ""
 	if outcome != nil {
 		message = outcome.Error()
@@ -550,6 +549,7 @@ func finish(result *Result, log *eventLog, runDirectory string, state State, exi
 	result.DurationMillis = completedAt.Sub(result.StartedAt).Milliseconds()
 	if collectedTokenUsageIsAuthoritative {
 		result.TokenUsage = collectedTokenUsage
+		result.Usage = collectedUsage
 	} else {
 		result.TokenUsage = readTokenUsage(filepath.Join(runDirectory, tokenUsageFileName))
 	}

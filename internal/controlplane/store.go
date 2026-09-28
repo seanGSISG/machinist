@@ -1014,6 +1014,9 @@ func (s *Store) Complete(ctx context.Context, runID string, completion protocol.
 	if _, err := tx.ExecContext(ctx, `UPDATE runs SET state=?,exit_code=?,error=?,result=?,events=?,lease_expires_at=NULL,completed_at=?,duration_millis=?,token_usage=? WHERE id=?`, completion.State, completion.ExitCode, completion.Error, string(completion.Result), completion.Events, now, durationMillis, tokenUsage, runID); err != nil {
 		return err
 	}
+	if err := s.writeRunUsage(ctx, tx, runID, completion.Usage, completedAt); err != nil {
+		return fmt.Errorf("write run usage: %w", err)
+	}
 	if handled, err := completeWorkflow(ctx, tx, jobID, runID, completion, now); handled || err != nil {
 		if err != nil {
 			return err
